@@ -5,6 +5,7 @@ import {
   DollarSign,
   Plus,
   Printer,
+  RefreshCw,
   RotateCcw,
   Save,
   Users,
@@ -38,6 +39,10 @@ function formatTimestamp(iso: string): string {
 export function SettingsView() {
   const {
     state,
+    isOnline,
+    isSyncingBcvRate,
+    bcvSyncError,
+    syncBcvRate,
     updateExchangeRate,
     saveMenuItem,
     saveUser,
@@ -100,12 +105,23 @@ export function SettingsView() {
       return;
     }
     try {
-      await updateExchangeRate(parsed);
+      await updateExchangeRate(parsed, 'Manual');
       setFeedbackMessage(
-        `Tasa actualizada a 1 USD = ${parsed.toFixed(2)} Bs. Las cuentas ya cerradas conservan su tasa histórica.`,
+        `Tasa manual guardada en 1 USD = ${parsed.toFixed(2)} Bs. Las cuentas ya cerradas conservan su tasa histórica.`,
       );
     } catch (err) {
       setErrorMessage(err instanceof Error ? err.message : 'Error al actualizar la tasa.');
+    }
+  };
+
+  const handleSyncBcv = async () => {
+    setErrorMessage(null);
+    setFeedbackMessage(null);
+    const result = await syncBcvRate();
+    if (result) {
+      setFeedbackMessage(
+        `Tasa sincronizada desde ${result.source}: 1 USD = ${result.rate.toFixed(2)} Bs.`,
+      );
     }
   };
 
@@ -268,11 +284,16 @@ export function SettingsView() {
         </p>
       )}
 
-      {/* 1. Tasa del día */}
+      {/* 1. Tasa del día (BCV automática + respaldo manual) */}
       <section className="bg-white border border-[#E5DFD3] rounded-2xl overflow-hidden">
-        <div className="px-5 py-3.5 bg-[#F2EDE4] border-b border-[#E5DFD3] flex items-center gap-2">
-          <DollarSign className="h-4 w-4 text-[#0E7490]" aria-hidden="true" />
-          <h2 className="text-base font-extrabold text-[#0F2A36]">Tasa del día (Bs / USD)</h2>
+        <div className="px-5 py-3.5 bg-[#F2EDE4] border-b border-[#E5DFD3] flex flex-wrap items-center justify-between gap-2">
+          <div className="flex items-center gap-2">
+            <DollarSign className="h-4 w-4 text-[#0E7490]" aria-hidden="true" />
+            <h2 className="text-base font-extrabold text-[#0F2A36]">Tasa BCV (Bs / USD)</h2>
+          </div>
+          <span className="px-2.5 py-0.5 rounded-full bg-[#0E7490]/12 text-[#0E7490] text-xs font-bold">
+            Fuente: {state.settings.exchangeRateSource ?? 'BCV automático'}
+          </span>
         </div>
 
         <div className="p-5 space-y-3">
@@ -297,16 +318,35 @@ export function SettingsView() {
 
             <button
               type="button"
+              disabled={!isOnline || isSyncingBcvRate}
+              onClick={() => void handleSyncBcv()}
+              className="min-h-12 px-5 rounded-xl bg-[#0E7490] hover:bg-[#0B5E75] disabled:opacity-50 text-white text-sm font-bold inline-flex items-center gap-2 cursor-pointer disabled:cursor-not-allowed"
+            >
+              <RefreshCw
+                className={`h-4 w-4 ${isSyncingBcvRate ? 'animate-spin' : ''}`}
+                aria-hidden="true"
+              />
+              <span>
+                {isSyncingBcvRate ? 'Consultando BCV...' : 'Actualizar desde BCV'}
+              </span>
+            </button>
+
+            <button
+              type="button"
               onClick={() => void handleSaveRate()}
-              className="min-h-12 px-5 rounded-xl bg-[#0E7490] hover:bg-[#0B5E75] text-white text-sm font-bold inline-flex items-center gap-2 cursor-pointer"
+              className="min-h-12 px-5 rounded-xl bg-white hover:bg-[#FAF8F4] border border-[#E5DFD3] text-[#0F2A36] text-sm font-bold inline-flex items-center gap-2 cursor-pointer"
             >
               <Save className="h-4 w-4" aria-hidden="true" />
               <span>Guardar tasa</span>
             </button>
           </div>
 
+          {bcvSyncError && (
+            <p className="text-xs font-semibold text-[#B45309]">{bcvSyncError}</p>
+          )}
+
           <p className="text-xs font-medium text-[#0F2A36]/70 tabular-nums">
-            Última actualización: {formatTimestamp(state.settings.exchangeRateUpdatedAt)}. Cambiar la tasa actualiza únicamente las cuentas abiertas; las cuentas cerradas mantienen su tasa histórica.
+            Última actualización: {formatTimestamp(state.settings.exchangeRateUpdatedAt)}. La app consulta automáticamente la tasa oficial del BCV al iniciar y cada 30 minutos; si estás sin internet, conserva la última tasa guardada. Cambiar la tasa actualiza únicamente las cuentas abiertas; las cuentas cerradas mantienen su tasa histórica.
           </p>
         </div>
       </section>

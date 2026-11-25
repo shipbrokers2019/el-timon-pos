@@ -9,6 +9,7 @@ import {
   type ReactNode,
 } from 'react';
 import type { TicketPayload } from '../domain/escpos';
+import { fetchBcvRate, type BcvRateResult } from '../services/bcvService';
 import { createPosRepository } from '../services/firebaseRepository';
 import type {
   CloseShiftResult,
@@ -42,9 +43,12 @@ export interface PosContextValue {
   isOnline: boolean;
   isOfflineSimulated: boolean;
   pendingSyncCount: number;
+  isSyncingBcvRate: boolean;
+  bcvSyncError: string | null;
   activeTicketPreview: PrintJob | null;
   setLockedStationRole: (role: Role | null) => void;
   setOfflineSimulation: (offline: boolean) => void;
+  syncBcvRate: () => Promise<BcvRateResult | null>;
   dismissTicketPreview: () => void;
   openTicketPreview: (job: PrintJob) => void;
   loginWithPin: (pin: string) => UserProfile | null;
@@ -74,7 +78,7 @@ export interface PosContextValue {
   ) => Promise<Ingredient>;
   saveMenuItem: (item: Omit<MenuItem, 'id'> & { id?: string }) => Promise<MenuItem>;
   toggleMenuOutOfStock: (menuItemId: string, outOfStock?: boolean) => Promise<MenuItem>;
-  updateExchangeRate: (rate: number) => Promise<void>;
+  updateExchangeRate: (rate: number, source?: string) => Promise<void>;
   saveUser: (user: Omit<UserProfile, 'id'> & { id?: string }) => Promise<UserProfile>;
   savePrinterConfig: (printer: PrinterConfig) => Promise<void>;
   createPreCuentaPrintJob: (orderId: string) => Promise<PrintJob>;
@@ -201,6 +205,8 @@ export function PosProvider({
     typeof navigator !== 'undefined' ? navigator.onLine : true,
   );
   const [isOfflineSimulated, setIsOfflineSimulated] = useState<boolean>(false);
+  const [isSyncingBcvRate, setIsSyncingBcvRate] = useState<boolean>(false);
+  const [bcvSyncError, setBcvSyncError] = useState<string | null>(null);
   const [activeTicketPreview, setActiveTicketPreview] = useState<PrintJob | null>(null);
   const [currentUserId, setCurrentUserId] = useState<string | null>(() =>
     readSessionValue(CURRENT_USER_KEY),
@@ -242,6 +248,43 @@ export function PosProvider({
       window.removeEventListener('offline', handleOffline);
     };
   }, []);
+
+  const syncBcvRate = useCallback(async (): Promise<BcvRateResult | null> => {
+    if (!isOnlineRef.current) {
+      setBcvSyncError('Sin conexión para consultar la tasa BCV.');
+      return null;
+    }
+    setIsSyncingBcvRate(true);
+    setBcvSyncError(null);
+    try {
+      const result = await fetchBcvRate();
+      await repo.updateExchangeRate(result.rate, result.source);
+      return result;
+    } catch (err) {
+      setBcvSyncError(
+        err instanceof Error
+          ? err.message
+          : 'No se pudo consultar la tasa BCV en este momento.',
+      );
+      return null;
+    } finally {
+      setIsSyncingBcvRate(false);
+    }
+  }, [repo]);
+
+  // Auto-fetch official BCV rate on startup, on reconnect, and every 30 min (skipped in automated tests)
+  useEffect(() => {
+    if (import.meta.env.MODE === 'test' || !isOnline) {
+      return;
+    }
+    void syncBcvRate();
+    const intervalId = window.setInterval(() => {
+      if (isOnlineRef.current) {
+        void syncBcvRate();
+      }
+    }, 30 * 60 * 1000);
+    return () => window.clearInterval(intervalId);
+  }, [isOnline, syncBcvRate]);
 
   useEffect(() => {
     const wasOnline = previousOnlineRef.current;
@@ -499,9 +542,12 @@ export function PosProvider({
     isOnline,
     isOfflineSimulated,
     pendingSyncCount,
+    isSyncingBcvRate,
+    bcvSyncError,
     activeTicketPreview,
     setLockedStationRole,
     setOfflineSimulation: setIsOfflineSimulated,
+    syncBcvRate,
     dismissTicketPreview: () => setActiveTicketPreview(null),
     openTicketPreview: (job) => setActiveTicketPreview(job),
     loginWithPin,
@@ -529,7 +575,7 @@ export function PosProvider({
     saveMenuItem: (item) => repo.saveMenuItem(item),
     toggleMenuOutOfStock: (menuItemId, outOfStock) =>
       repo.toggleMenuOutOfStock(menuItemId, outOfStock),
-    updateExchangeRate: (rate) => repo.updateExchangeRate(rate),
+    updateExchangeRate: (rate, source) => repo.updateExchangeRate(rate, source),
     saveUser: (user) => repo.saveUser(user),
     savePrinterConfig: (printer) => repo.savePrinterConfig(printer),
     createPreCuentaPrintJob,

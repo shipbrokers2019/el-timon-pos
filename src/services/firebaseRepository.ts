@@ -650,8 +650,8 @@ export class FirebasePosRepository implements PosRepository {
     return updated;
   }
 
-  async updateExchangeRate(rate: number): Promise<void> {
-    await this.local.updateExchangeRate(rate);
+  async updateExchangeRate(rate: number, source = 'Manual'): Promise<void> {
+    await this.local.updateExchangeRate(rate, source);
     const state = this.local.getState();
     const batch = writeBatch(this.db);
     batch.set(doc(this.db, 'settings', 'app'), state.settings, { merge: true });

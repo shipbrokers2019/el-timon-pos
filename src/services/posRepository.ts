@@ -82,7 +82,7 @@ export interface PosRepository {
   saveIngredient(ingredient: Omit<Ingredient, 'id'> & { id?: string }): Promise<Ingredient>;
   saveMenuItem(item: Omit<MenuItem, 'id'> & { id?: string }): Promise<MenuItem>;
   toggleMenuOutOfStock(menuItemId: string, outOfStock?: boolean): Promise<MenuItem>;
-  updateExchangeRate(rate: number): Promise<void>;
+  updateExchangeRate(rate: number, source?: string): Promise<void>;
   saveUser(user: Omit<UserProfile, 'id'> & { id?: string }): Promise<UserProfile>;
   savePrinterConfig(printer: PrinterConfig): Promise<void>;
   createPreCuentaPrintJob(orderId: string): Promise<PrintJob>;
@@ -968,7 +968,7 @@ export class LocalPosRepository implements PosRepository {
     return updated;
   }
 
-  async updateExchangeRate(rate: number): Promise<void> {
+  async updateExchangeRate(rate: number, source = 'Manual'): Promise<void> {
     if (!Number.isFinite(rate) || rate <= 0) {
       throw new Error('La tasa de cambio debe ser mayor que 0');
     }
@@ -993,6 +993,7 @@ export class LocalPosRepository implements PosRepository {
         ...this.state.settings,
         exchangeRate: rate,
         exchangeRateUpdatedAt: nowIso,
+        exchangeRateSource: source,
       },
     });
   }

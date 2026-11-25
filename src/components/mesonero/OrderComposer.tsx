@@ -11,6 +11,7 @@ import {
   X,
 } from 'lucide-react';
 import { usePos } from '../../store/PosProvider';
+import { usdToBs } from '../../domain/currency';
 import type { ComandaStatus, Location, MenuCategory, OrderItem } from '../../types/pos';
 
 interface OrderComposerProps {
@@ -282,7 +283,7 @@ export function OrderComposer({ location, onClose }: OrderComposerProps) {
             >
               <div className="min-w-0">
                 <p className="text-sm font-bold leading-snug truncate">{item.name}</p>
-                <div className="flex items-center gap-2 mt-0.5">
+                <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 mt-0.5">
                   <span
                     className={`text-xs font-extrabold tabular-nums ${
                       item.outOfStock ? 'text-[#0F2A36]/45' : 'text-[#0E7490]'
@@ -290,7 +291,16 @@ export function OrderComposer({ location, onClose }: OrderComposerProps) {
                   >
                     ${item.priceUsd.toFixed(2)}
                   </span>
-                  <span className="text-xs font-medium text-[#0F2A36]/60">{item.category}</span>
+                  <span
+                    className={`text-[11px] font-semibold tabular-nums ${
+                      item.outOfStock ? 'text-[#0F2A36]/40' : 'text-[#0F2A36]/70'
+                    }`}
+                  >
+                    Bs {usdToBs(item.priceUsd, state.settings.exchangeRate).toFixed(2)}
+                  </span>
+                  <span className="text-[11px] font-medium text-[#0F2A36]/55">
+                    {item.category}
+                  </span>
                 </div>
               </div>
               {item.outOfStock ? (

@@ -6,6 +6,7 @@ import {
   LayoutGrid,
   Package,
   Pencil,
+  RefreshCw,
   Settings,
 } from 'lucide-react';
 import { getLowStockIngredients } from '../../domain/recipes';
@@ -19,7 +20,7 @@ import { SettingsView } from './SettingsView';
 type CajaSection = 'floor' | 'cash_close' | 'inventory' | 'analytics' | 'settings';
 
 export function CajaLayout() {
-  const { state } = usePos();
+  const { state, isOnline, isSyncingBcvRate, syncBcvRate } = usePos();
   const [activeSection, setActiveSection] = useState<CajaSection>('floor');
 
   const openAccountsCount = useMemo(
@@ -90,21 +91,45 @@ export function CajaLayout() {
               Caja y Administración · {state.settings.printer.restaurantName}
             </h1>
 
-            <button
-              type="button"
-              onClick={() => setActiveSection('settings')}
-              title="Editar tasa del día en Configuración"
-              className="min-h-12 px-3.5 rounded-xl bg-white border border-[#E5DFD3] hover:border-[#0E7490] inline-flex items-center gap-2 text-xs sm:text-sm font-bold text-[#0F2A36] tabular-nums transition-colors cursor-pointer"
-            >
-              <DollarSign className="h-4 w-4 text-[#0E7490]" aria-hidden="true" />
-              <span>
-                Tasa del día:{' '}
-                <strong className="text-[#0E7490]">
-                  1 USD = {state.settings.exchangeRate.toFixed(2)} Bs
-                </strong>
-              </span>
-              <Pencil className="h-3.5 w-3.5 text-[#0F2A36]/60" aria-hidden="true" />
-            </button>
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setActiveSection('settings')}
+                title="Editar tasa del día en Configuración"
+                className="min-h-12 px-3.5 rounded-xl bg-white border border-[#E5DFD3] hover:border-[#0E7490] inline-flex items-center gap-2 text-xs sm:text-sm font-bold text-[#0F2A36] tabular-nums transition-colors cursor-pointer"
+              >
+                <DollarSign className="h-4 w-4 text-[#0E7490]" aria-hidden="true" />
+                <span>
+                  Tasa BCV:{' '}
+                  <strong className="text-[#0E7490]">
+                    1 USD = {state.settings.exchangeRate.toFixed(2)} Bs
+                  </strong>
+                </span>
+                {state.settings.exchangeRateSource && (
+                  <span className="hidden sm:inline px-2 py-0.5 rounded-full bg-[#0E7490]/10 text-[#0E7490] text-[11px] font-bold">
+                    {state.settings.exchangeRateSource}
+                  </span>
+                )}
+                <Pencil className="h-3.5 w-3.5 text-[#0F2A36]/60" aria-hidden="true" />
+              </button>
+
+              <button
+                type="button"
+                disabled={!isOnline || isSyncingBcvRate}
+                onClick={() => void syncBcvRate()}
+                aria-label="Actualizar tasa desde BCV ahora"
+                title="Actualizar tasa oficial BCV"
+                className="min-h-12 px-3 rounded-xl bg-white border border-[#E5DFD3] hover:border-[#0E7490] disabled:opacity-50 text-[#0E7490] text-xs font-bold inline-flex items-center gap-1.5 transition-colors cursor-pointer disabled:cursor-not-allowed"
+              >
+                <RefreshCw
+                  className={`h-4 w-4 ${isSyncingBcvRate ? 'animate-spin' : ''}`}
+                  aria-hidden="true"
+                />
+                <span className="hidden md:inline">
+                  {isSyncingBcvRate ? 'Actualizando...' : 'Actualizar BCV'}
+                </span>
+              </button>
+            </div>
           </div>
 
           <nav

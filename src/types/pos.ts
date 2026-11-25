@@ -186,6 +186,7 @@ export interface PrintJob {
 export interface AppSettings {
   exchangeRate: number;
   exchangeRateUpdatedAt: string;
+  exchangeRateSource?: string;
   printer: PrinterConfig;
 }
 
