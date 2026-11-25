@@ -304,9 +304,10 @@ function buildTicketSections(payload: TicketPayload): TicketSections {
   }
 }
 
-function toAsciiSafe(text: string): string {
+export function toAsciiSafe(text: string): string {
+  const normalized = text.normalize('NFC');
   let out = '';
-  for (const ch of text) {
+  for (const ch of normalized) {
     if (ch in LATIN_TRANSLITERATIONS) {
       out += LATIN_TRANSLITERATIONS[ch];
     } else {

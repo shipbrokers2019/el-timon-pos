@@ -255,4 +255,51 @@ describe('seedData & LocalPosRepository', () => {
     expect(shift.totalsByMethod.efectivo_bs.totalBs).toBe(630);
     expect(printJob.type).toBe('cierre');
   });
+
+  it('treats duplicate comandaId against an already-closed order as idempotent without reopening table or double-deducting stock', async () => {
+    const repo = new LocalPosRepository();
+
+    const { order } = await repo.submitComanda({
+      comandaId: 'cmd-replay-1',
+      locationId: 'mesa-7',
+      waiterId: 'user-carlos',
+      waiterName: 'Carlos (Mesonero)',
+      items: [{ menuItemId: 'menu-hamburguesa-playera', quantity: 1, notes: '' }],
+    });
+
+    const carneAfterFirst = repo
+      .getState()
+      .ingredients.find((i) => i.id === 'ing-carne-molida')!.stock;
+    const movementsAfterFirst = repo.getState().movements.length;
+
+    await repo.settleOrder(order.id, [
+      createPaymentEntry({
+        id: 'pay-replay',
+        method: 'efectivo_usd',
+        amountNative: 8.5,
+        exchangeRate: 52.5,
+        paidAt: '2026-11-25T16:00:00Z',
+      }),
+    ]);
+
+    expect(repo.getState().locations.find((l) => l.id === 'mesa-7')?.status).toBe('libre');
+
+    // Replay the exact same comandaId after the order has already been closed
+    const replayed = await repo.submitComanda({
+      comandaId: 'cmd-replay-1',
+      locationId: 'mesa-7',
+      waiterId: 'user-carlos',
+      waiterName: 'Carlos (Mesonero)',
+      items: [{ menuItemId: 'menu-hamburguesa-playera', quantity: 1, notes: '' }],
+    });
+
+    expect(replayed.order.id).toBe(order.id);
+    expect(replayed.order.status).toBe('cerrada');
+    expect(repo.getState().orders).toHaveLength(1);
+    expect(repo.getState().locations.find((l) => l.id === 'mesa-7')?.status).toBe('libre');
+    expect(
+      repo.getState().ingredients.find((i) => i.id === 'ing-carne-molida')!.stock,
+    ).toBe(carneAfterFirst);
+    expect(repo.getState().movements).toHaveLength(movementsAfterFirst);
+  });
 });

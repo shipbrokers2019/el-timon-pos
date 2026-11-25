@@ -114,6 +114,69 @@ function readStoredStationRole(): Role | null {
   return null;
 }
 
+function resolveTicketPayload(
+  job: PrintJob,
+  posState: PosState,
+): TicketPayload | undefined {
+  const { printer, exchangeRate } = posState.settings;
+  const restaurantName = printer.restaurantName;
+
+  switch (job.type) {
+    case 'comanda': {
+      const comanda = posState.comandas.find((c) => c.id === job.referenceId);
+      return comanda ? { type: 'comanda', restaurantName, comanda } : undefined;
+    }
+    case 'anulacion': {
+      const voidComanda = posState.comandas.find((c) => c.id === job.referenceId);
+      const item = voidComanda?.items[0];
+      if (!voidComanda || !item) return undefined;
+      return {
+        type: 'anulacion',
+        restaurantName,
+        locationLabel: voidComanda.locationLabel,
+        waiterName: voidComanda.waiterName,
+        item,
+        reason: voidComanda.voidReason ?? item.voidReason ?? '',
+        timestampIso: job.createdAt,
+      };
+    }
+    case 'precuenta': {
+      const order = posState.orders.find((o) => o.id === job.referenceId);
+      if (!order) return undefined;
+      return {
+        type: 'precuenta',
+        restaurantName,
+        order,
+        exchangeRate: order.status === 'cerrada' ? order.exchangeRate : exchangeRate,
+        timestampIso: job.createdAt,
+      };
+    }
+    case 'cierre': {
+      const shift = posState.shifts.find((s) => s.id === job.referenceId);
+      if (!shift) return undefined;
+      const closedByName =
+        posState.users.find((u) => u.id === shift.closedBy)?.name ??
+        shift.closedBy ??
+        '';
+      return {
+        type: 'cierre',
+        restaurantName,
+        shift,
+        closedByName,
+        timestampIso: job.createdAt,
+      };
+    }
+    case 'prueba':
+      return {
+        type: 'prueba',
+        restaurantName,
+        ip: printer.ip,
+        port: printer.port,
+        timestampIso: job.createdAt,
+      };
+  }
+}
+
 export function PosProvider({
   children,
   repository,
@@ -188,17 +251,23 @@ export function PosProvider({
     }
   }, [isOnline, repo]);
 
-  const printCoordinator = useMemo(
-    () =>
-      new PrintCoordinator({
-        onPreviewTicket: (job) => {
-          setActiveTicketPreview(job);
-        },
-        onJobStatusChange: (jobId, status, meta) =>
-          repo.updatePrintJobStatus(jobId, status, meta),
-      }),
-    [repo],
-  );
+  const printCoordinator = useMemo(() => {
+    const initiallyPrintedIds = repo
+      .getState()
+      .printJobs.filter(
+        (job) => job.status === 'printed' || job.status === 'printed_locally',
+      )
+      .map((job) => job.id);
+
+    return new PrintCoordinator({
+      initiallyPrintedIds,
+      onPreviewTicket: (job) => {
+        setActiveTicketPreview(job);
+      },
+      onJobStatusChange: (jobId, status, meta) =>
+        repo.updatePrintJobStatus(jobId, status, meta),
+    });
+  }, [repo]);
 
   // Auto-print incoming pending kitchen/void jobs when running on Cocina station
   const activeRole = lockedStationRole ?? null;
@@ -228,15 +297,7 @@ export function PosProvider({
     );
 
     for (const job of pendingKitchenJobs) {
-      const comanda = state.comandas.find((c) => c.id === job.referenceId);
-      const payload: TicketPayload | undefined =
-        job.type === 'comanda' && comanda
-          ? {
-              type: 'comanda',
-              restaurantName: state.settings.printer.restaurantName,
-              comanda,
-            }
-          : undefined;
+      const payload = resolveTicketPayload(job, state);
 
       void printCoordinator.printJob({
         job,
@@ -249,9 +310,7 @@ export function PosProvider({
     effectiveRole,
     isOnline,
     printCoordinator,
-    state.comandas,
-    state.printJobs,
-    state.settings.printer,
+    state,
   ]);
 
   const setLockedStationRole = useCallback((role: Role | null) => {
@@ -344,6 +403,7 @@ export function PosProvider({
         await printCoordinator.printJob({
           job: newVoidJob,
           config: latest.settings.printer,
+          payload: resolveTicketPayload(newVoidJob, latest),
           isCloudOffline: true,
         });
       }
@@ -424,6 +484,7 @@ export function PosProvider({
       await printCoordinator.printJob({
         job,
         config: latest.settings.printer,
+        payload: resolveTicketPayload(job, latest),
         isCloudOffline: !isOnlineRef.current,
         forceReprint: true,
       });

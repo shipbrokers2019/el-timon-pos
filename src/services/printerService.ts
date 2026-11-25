@@ -1,4 +1,8 @@
-import { buildEscPosBytes, type TicketPayload } from '../domain/escpos';
+import {
+  buildEscPosBytes,
+  toAsciiSafe,
+  type TicketPayload,
+} from '../domain/escpos';
 import type { PrintJob, PrinterConfig, PrintStatus } from '../types/pos';
 
 export interface TcpPrintTransport {
@@ -47,10 +51,10 @@ export interface PrintExecutionResult {
 }
 
 function encodePreviewAsEscPos(textPreview: string): Uint8Array {
+  const safe = toAsciiSafe(textPreview);
   const bytes: number[] = [0x1b, 0x40];
-  for (let i = 0; i < textPreview.length; i += 1) {
-    const code = textPreview.charCodeAt(i);
-    bytes.push(code === 0x0a || (code >= 0x20 && code <= 0x7e) ? code : 0x3f);
+  for (let i = 0; i < safe.length; i += 1) {
+    bytes.push(safe.charCodeAt(i));
   }
   bytes.push(0x0a, 0x0a, 0x0a, 0x0a, 0x1d, 0x56, 0x42, 0x00);
   return new Uint8Array(bytes);

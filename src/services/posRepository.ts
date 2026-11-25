@@ -206,6 +206,10 @@ export class LocalPosRepository implements PosRepository {
     return pendingComandaIds.size;
   }
 
+  getOfflineQueueIds(): string[] {
+    return Array.from(this.offlineQueue);
+  }
+
   subscribe(listener: (state: PosState) => void): () => void {
     this.listeners.add(listener);
     return () => {
@@ -258,6 +262,24 @@ export class LocalPosRepository implements PosRepository {
 
     const nowIso = new Date().toISOString();
     const comandaId = input.comandaId ?? createId('cmd');
+
+    // Idempotency guard across ALL orders (open and already-closed)
+    const existingOrderForComanda = this.state.orders.find((o) =>
+      o.items.some((item) => item.comandaId === comandaId),
+    );
+    if (existingOrderForComanda) {
+      const existingComanda =
+        this.state.comandas.find((c) => c.id === comandaId) ?? null;
+      const existingJob = existingComanda
+        ? this.state.printJobs.find((j) => j.referenceId === existingComanda.id) ?? null
+        : null;
+      return {
+        order: existingOrderForComanda,
+        comanda: existingComanda,
+        printJob: existingJob,
+      };
+    }
+
     const menuById = new Map(this.state.menu.map((item) => [item.id, item]));
     const activeShift = this.state.shifts.find((shift) => shift.status === 'abierto');
 
@@ -267,16 +289,6 @@ export class LocalPosRepository implements PosRepository {
           o.status === 'abierta' &&
           (o.id === location.activeOrderId || o.locationId === location.id),
       ) ?? null;
-
-    // Idempotency guard if the exact comandaId was already submitted
-    if (order && order.items.some((item) => item.comandaId === comandaId)) {
-      const existingComanda =
-        this.state.comandas.find((c) => c.id === comandaId) ?? null;
-      const existingJob = existingComanda
-        ? this.state.printJobs.find((j) => j.referenceId === existingComanda.id) ?? null
-        : null;
-      return { order, comanda: existingComanda, printJob: existingJob };
-    }
 
     const isNewOrder = order === null;
     if (!order) {
