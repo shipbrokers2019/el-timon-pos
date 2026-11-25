@@ -2,6 +2,7 @@ import { useEffect } from 'react';
 import { Printer, X } from 'lucide-react';
 import { usePos } from '../store/PosProvider';
 import type { PrintJob, PrintStatus } from '../types/pos';
+import { BrandLogo } from './BrandLogo';
 
 interface TicketPreviewModalProps {
   job?: PrintJob | null;
@@ -50,21 +51,24 @@ export function TicketPreviewModal({ job, onClose }: TicketPreviewModalProps) {
     >
       <div className="w-full max-w-md bg-[#FAF8F4] text-[#0F2A36] border border-[#0F2A36]/20 rounded-2xl shadow-xl overflow-hidden flex flex-col max-h-[90vh]">
         <div className="px-5 py-4 bg-[#F2EDE4] border-b border-[#0F2A36]/15 flex items-center justify-between gap-3">
-          <div className="min-w-0">
-            <h2 id="ticket-preview-title" className="text-base font-bold truncate">
-              {resolvedJob.title}
-            </h2>
-            <div className="mt-1 flex items-center gap-2">
-              <span
-                className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-bold ${badge.className}`}
-              >
-                {badge.label}
-              </span>
-              {resolvedJob.error && (
-                <span className="text-xs font-medium text-[#B91C1C] truncate">
-                  {resolvedJob.error}
+          <div className="flex items-center gap-3 min-w-0">
+            <BrandLogo size="sm" />
+            <div className="min-w-0">
+              <h2 id="ticket-preview-title" className="text-base font-bold truncate">
+                {resolvedJob.title}
+              </h2>
+              <div className="mt-1 flex items-center gap-2">
+                <span
+                  className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-bold ${badge.className}`}
+                >
+                  {badge.label}
                 </span>
-              )}
+                {resolvedJob.error && (
+                  <span className="text-xs font-medium text-[#B91C1C] truncate">
+                    {resolvedJob.error}
+                  </span>
+                )}
+              </div>
             </div>
           </div>
 

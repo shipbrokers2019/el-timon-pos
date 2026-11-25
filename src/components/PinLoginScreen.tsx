@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useState } from 'react';
-import { Delete, Lock, ShieldCheck, Unlock } from 'lucide-react';
+import { Delete, Lock, Unlock } from 'lucide-react';
 import { usePos } from '../store/PosProvider';
 import type { Role } from '../types/pos';
+import { BrandLogo } from './BrandLogo';
 
 const STATION_ROLE_LABELS: Record<Role, string> = {
   mesonero: 'Mesonero',
@@ -87,10 +88,10 @@ export function PinLoginScreen() {
     <main className="min-h-screen bg-[#FAF8F4] text-[#0F2A36] flex flex-col items-center justify-center px-4 py-8">
       <section className="w-full max-w-md bg-[#F2EDE4] border border-[#0F2A36]/15 rounded-2xl p-6 sm:p-8 shadow-sm">
         <header className="text-center mb-6">
-          <div className="mx-auto mb-3 h-12 w-12 rounded-xl bg-[#0E7490] text-white flex items-center justify-center">
-            <ShieldCheck className="h-6 w-6" aria-hidden="true" />
+          <div className="mb-3 flex justify-center">
+            <BrandLogo size="lg" />
           </div>
-          <h1 className="text-2xl font-bold tracking-tight text-[#0F2A36]">
+          <h1 className="text-2xl font-extrabold tracking-tight text-[#0F2A36]">
             {restaurantName}
           </h1>
           <p className="mt-1.5 text-sm font-medium text-[#0F2A36]/75">

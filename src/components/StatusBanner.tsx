@@ -2,6 +2,7 @@ import { Cloud, HardDrive, LogOut, RefreshCw, Wifi, WifiOff } from 'lucide-react
 import { isFirebaseConfigured } from '../services/firebaseRepository';
 import { usePos } from '../store/PosProvider';
 import type { Role } from '../types/pos';
+import { BrandLogo } from './BrandLogo';
 
 const ROLE_LABELS: Record<Role, string> = {
   mesonero: 'Mesonero',
@@ -36,6 +37,7 @@ export function StatusBanner() {
     >
       <div className="max-w-7xl mx-auto flex flex-wrap items-center justify-between gap-2.5">
         <div className="flex flex-wrap items-center gap-2.5">
+          <BrandLogo size="sm" />
           <span className="font-bold text-sm sm:text-base">{currentUser.name}</span>
           <span
             className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-bold ${

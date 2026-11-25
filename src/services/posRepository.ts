@@ -169,6 +169,10 @@ export class LocalPosRepository implements PosRepository {
   constructor() {
     const savedState = readJsonStorage<PosState>(POS_STORAGE_KEY);
     if (savedState && Array.isArray(savedState.locations) && savedState.locations.length > 0) {
+      if (savedState.settings?.printer?.restaurantName === 'Brisa Marina Beach Club') {
+        savedState.settings.printer.restaurantName = 'El Timón Restaurante';
+        writeJsonStorage(POS_STORAGE_KEY, savedState);
+      }
       this.state = savedState;
     } else {
       this.state = createInitialPosState();

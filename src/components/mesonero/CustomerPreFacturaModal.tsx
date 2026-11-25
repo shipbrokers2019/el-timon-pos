@@ -1,6 +1,7 @@
 import { useEffect } from 'react';
-import { ReceiptText, X } from 'lucide-react';
+import { X } from 'lucide-react';
 import type { PreFacturaSnapshot } from '../../types/pos';
+import { BrandLogo } from '../BrandLogo';
 
 interface CustomerPreFacturaModalProps {
   preFactura: PreFacturaSnapshot;
@@ -35,20 +36,20 @@ export function CustomerPreFacturaModal({
     >
       <div className="w-full max-w-md bg-[#FAF8F4] text-[#0F2A36] border border-[#0F2A36]/20 rounded-3xl shadow-2xl overflow-hidden flex flex-col max-h-[92vh]">
         {/* Header */}
-        <div className="px-6 py-5 bg-[#0E7490] text-white flex items-start justify-between gap-3">
-          <div className="space-y-1">
-            <div className="inline-flex items-center gap-2">
-              <ReceiptText className="h-5 w-5" aria-hidden="true" />
-              <h2 className="text-xl font-extrabold tracking-tight">
+        <div className="px-6 py-5 bg-[#0E7490] text-white flex items-center justify-between gap-3">
+          <div className="flex items-center gap-3.5 min-w-0">
+            <BrandLogo size="md" className="ring-2 ring-white/40" />
+            <div className="space-y-0.5 min-w-0">
+              <h2 className="text-xl font-extrabold tracking-tight truncate">
                 {preFactura.restaurantName}
               </h2>
+              <p className="text-sm font-bold text-white/90">
+                Pre-factura · {preFactura.locationLabel}
+              </p>
+              <p className="text-xs font-medium text-white/75 tabular-nums">
+                Emitida: {formattedDate}
+              </p>
             </div>
-            <p className="text-sm font-bold text-white/90">
-              Pre-factura · {preFactura.locationLabel}
-            </p>
-            <p className="text-xs font-medium text-white/75 tabular-nums">
-              Emitida: {formattedDate}
-            </p>
           </div>
           <button
             type="button"

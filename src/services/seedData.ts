@@ -320,7 +320,7 @@ export function createInitialPosState(): PosState {
       exchangeRate: 52.5,
       exchangeRateUpdatedAt: nowIso,
       printer: {
-        restaurantName: 'Brisa Marina Beach Club',
+        restaurantName: 'El Timón Restaurante',
         ip: '192.168.1.200',
         port: 9100,
         autoPrintFromKitchen: true,

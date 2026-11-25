@@ -30,7 +30,7 @@ describe('seedData & LocalPosRepository', () => {
     expect(state.shifts[0].status).toBe('abierto');
     expect(state.settings.exchangeRate).toBe(52.5);
     expect(state.settings.printer).toMatchObject({
-      restaurantName: 'Brisa Marina Beach Club',
+      restaurantName: 'El Timón Restaurante',
       ip: '192.168.1.200',
       port: 9100,
       autoPrintFromKitchen: true,

@@ -1,8 +1,8 @@
 import type { CapacitorConfig } from '@capacitor/cli';
 
 const config: CapacitorConfig = {
-  appId: 'com.brisamarina.pos',
-  appName: 'Brisa POS',
+  appId: 'com.eltimon.pos',
+  appName: 'El Timón POS',
   webDir: 'dist',
   server: {
     androidScheme: 'https',
