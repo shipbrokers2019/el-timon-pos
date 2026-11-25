@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
-import { Delete, Lock, Unlock } from 'lucide-react';
+import { Delete, Lock, LogOut, Unlock } from 'lucide-react';
+import { signOutStation } from '../services/firebaseAuth';
+import { isFirebaseConfigured } from '../services/firebaseRepository';
 import { usePos } from '../store/PosProvider';
 import type { Role } from '../types/pos';
 import { BrandLogo } from './BrandLogo';
@@ -226,12 +228,22 @@ export function PinLoginScreen() {
         </div>
 
         {/* Quick-reference demo hint footer */}
-        <footer className="mt-5 pt-4 border-t border-[#0F2A36]/15 text-center">
+        <footer className="mt-5 pt-4 border-t border-[#0F2A36]/15 text-center space-y-2.5">
           <p className="text-xs font-medium text-[#0F2A36]/75 leading-relaxed tabular-nums">
             PINs demo — Mesonero: <strong className="text-[#0F2A36]">1111</strong> · Cocina:{' '}
             <strong className="text-[#0F2A36]">2222</strong> · Caja/Admin:{' '}
             <strong className="text-[#0F2A36]">0000</strong>
           </p>
+          {isFirebaseConfigured() && (
+            <button
+              type="button"
+              onClick={() => void signOutStation()}
+              className="inline-flex items-center gap-1.5 text-xs font-semibold text-[#0E7490] hover:underline cursor-pointer"
+            >
+              <LogOut className="h-3.5 w-3.5" aria-hidden="true" />
+              <span>Cambiar estación en la nube</span>
+            </button>
+          )}
         </footer>
       </section>
     </main>

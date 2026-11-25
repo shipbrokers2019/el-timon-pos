@@ -2,6 +2,7 @@ import { getApp, getApps, initializeApp, type FirebaseOptions } from 'firebase/a
 import {
   collection,
   doc,
+  getDocs,
   getFirestore,
   initializeFirestore,
   onSnapshot,
@@ -42,10 +43,13 @@ interface ImportMetaWithEnv {
   env?: Record<string, string | undefined>;
 }
 
-function getFirebaseEnvConfig(): FirebaseOptions | null {
+export function getFirebaseEnvConfig(): FirebaseOptions | null {
   const env = (import.meta as unknown as ImportMetaWithEnv).env;
-  const apiKey = env?.VITE_FIREBASE_API_KEY?.trim();
-  if (!env || !apiKey) {
+  if (!env || env.MODE === 'test') {
+    return null;
+  }
+  const apiKey = env.VITE_FIREBASE_API_KEY?.trim();
+  if (!apiKey) {
     return null;
   }
 
@@ -63,7 +67,7 @@ export function isFirebaseConfigured(): boolean {
   return getFirebaseEnvConfig() !== null;
 }
 
-function initFirestoreClient(config: FirebaseOptions): Firestore {
+export function initFirestoreClient(config: FirebaseOptions): Firestore {
   const app = getApps().length > 0 ? getApp() : initializeApp(config);
   try {
     return initializeFirestore(app, {
@@ -90,6 +94,48 @@ export class FirebasePosRepository implements PosRepository {
     this.db = initFirestoreClient(config);
     this.stationRole = stationRole;
     this.attachListeners();
+    if (this.isAdminWriter()) {
+      void this.ensureInitialCloudSeed();
+    }
+  }
+
+  private async ensureInitialCloudSeed(): Promise<void> {
+    try {
+      const existingLocations = await getDocs(collection(this.db, 'locations'));
+      if (!existingLocations.empty) {
+        return;
+      }
+      const state = this.local.getState();
+      const batch = writeBatch(this.db);
+      for (const loc of state.locations) {
+        batch.set(doc(this.db, 'locations', loc.id), loc, { merge: true });
+      }
+      for (const item of state.menu) {
+        batch.set(doc(this.db, 'menu', item.id), item, { merge: true });
+      }
+      for (const ing of state.ingredients) {
+        batch.set(doc(this.db, 'ingredients', ing.id), ing, { merge: true });
+      }
+      for (const user of state.users) {
+        batch.set(doc(this.db, 'users', user.id), user, { merge: true });
+      }
+      for (const shift of state.shifts) {
+        batch.set(doc(this.db, 'shifts', shift.id), shift, { merge: true });
+      }
+      batch.set(doc(this.db, 'settings', 'app'), state.settings, { merge: true });
+      batch.set(
+        doc(this.db, 'settings', 'public'),
+        {
+          restaurantName: state.settings.printer.restaurantName,
+          printer: state.settings.printer,
+          updatedAt: new Date().toISOString(),
+        },
+        { merge: true },
+      );
+      this.commitNonBlocking(batch.commit());
+    } catch {
+      // Offline or rules not provisioned yet — local state remains usable
+    }
   }
 
   private isAdminWriter(): boolean {
@@ -768,6 +814,16 @@ export class FirebasePosRepository implements PosRepository {
     for (const shift of state.shifts) {
       batch.set(doc(this.db, 'shifts', shift.id), shift);
     }
+    batch.set(doc(this.db, 'settings', 'app'), state.settings, { merge: true });
+    batch.set(
+      doc(this.db, 'settings', 'public'),
+      {
+        restaurantName: state.settings.printer.restaurantName,
+        printer: state.settings.printer,
+        updatedAt: new Date().toISOString(),
+      },
+      { merge: true },
+    );
     this.commitNonBlocking(batch.commit());
   }
 }

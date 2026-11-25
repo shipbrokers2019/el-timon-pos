@@ -184,13 +184,16 @@ function resolveTicketPayload(
 export function PosProvider({
   children,
   repository,
+  forcedStationRole,
 }: {
   children: ReactNode;
   repository?: PosRepository;
+  forcedStationRole?: Role | null;
 }) {
-  const [lockedStationRole, setLockedStationRoleState] = useState<Role | null>(() =>
+  const [storedStationRole, setStoredStationRoleState] = useState<Role | null>(() =>
     readStoredStationRole(),
   );
+  const lockedStationRole = forcedStationRole ?? storedStationRole;
 
   const repo = useMemo(
     () => repository ?? createPosRepository({ stationRole: lockedStationRole }),
@@ -364,7 +367,7 @@ export function PosProvider({
         localStorage.setItem(STATION_LOCK_KEY, role);
       }
     }
-    setLockedStationRoleState(role);
+    setStoredStationRoleState(role);
   }, []);
 
   const loginWithPin = useCallback(
