@@ -58,6 +58,7 @@ export interface PosContextValue {
   updateComandaStatus: (comandaId: string, status: ComandaStatus) => Promise<void>;
   acknowledgeKitchenReady: (locationId: string) => Promise<void>;
   requestCheck: (locationId: string) => Promise<void>;
+  releaseLocation: (locationId: string) => Promise<void>;
   voidOrderItem: (
     orderId: string,
     itemId: string,
@@ -562,6 +563,7 @@ export function PosProvider({
     acknowledgeKitchenReady: (locationId) =>
       repo.acknowledgeKitchenReady(locationId),
     requestCheck: (locationId) => repo.requestCheck(locationId),
+    releaseLocation: (locationId) => repo.releaseLocation(locationId),
     voidOrderItem,
     settleOrder: (orderId, payments) => repo.settleOrder(orderId, payments),
     openShift: () => repo.openShift(requireUser().id),

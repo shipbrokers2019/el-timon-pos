@@ -61,6 +61,7 @@ export function CajaFloorView() {
     submitComanda,
     voidOrderItem,
     createPreCuentaPrintJob,
+    releaseLocation,
   } = usePos();
 
   const [zoneFilter, setZoneFilter] = useState<ZoneFilter>('todas');
@@ -334,7 +335,9 @@ export function CajaFloorView() {
             </div>
           </div>
         ) : (
-          <p className="text-xs font-medium text-[#0F2A36]/55">Disponible</p>
+          <p className="text-xs font-medium text-[#0F2A36]/55">
+            {loc.status === 'libre' ? 'Disponible' : 'Sin pedido activo'}
+          </p>
         )}
       </button>
     );
@@ -557,9 +560,25 @@ export function CajaFloorView() {
                     </button>
                   </div>
                 </>
+              ) : selectedLocation.status !== 'libre' ? (
+                <div className="p-3.5 rounded-xl bg-amber-50 border border-[#B45309]/35 space-y-2.5">
+                  <p className="text-xs sm:text-sm font-semibold text-[#92400E]">
+                    Esta mesa quedó marcada como ocupada sin pedidos activos (por un corte previo de sincronización).
+                  </p>
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      await releaseLocation(selectedLocation.id);
+                      setActionFeedback(`${selectedLocation.label} liberada correctamente.`);
+                    }}
+                    className="min-h-11 px-4 rounded-xl bg-[#B45309] hover:bg-[#92400E] text-white text-xs font-bold cursor-pointer"
+                  >
+                    Liberar {selectedLocation.label}
+                  </button>
+                </div>
               ) : (
                 <p className="text-sm font-medium text-[#0F2A36]/70">
-                  Esta ubicación está libre. Puedes agregar un producto directamente desde Caja para abrir cuenta.
+                  {selectedLocation.label} está libre. Elige productos abajo para abrir cuenta directamente desde Caja.
                 </p>
               )}
 

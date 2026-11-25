@@ -203,25 +203,29 @@ export class FirebasePosRepository implements PosRepository {
           .filter((id): id is string => Boolean(id)),
       );
 
+      const orphanLocationIds: string[] = [];
       for (const locDoc of existingLocations.docs) {
         const data = locDoc.data() as Partial<Location>;
         const hasOpenOrder =
           openOrderLocationIds.has(locDoc.id) ||
           (typeof data.activeOrderId === 'string' && openOrderIds.has(data.activeOrderId));
         if (data.status && data.status !== 'libre' && !hasOpenOrder) {
-          batch.set(
-            doc(this.db, 'locations', locDoc.id),
-            {
-              status: 'libre',
-              activeOrderId: null,
-              kitchenReadyAlert: false,
-              pendingSync: false,
-              preFacturaReady: false,
-            },
-            { merge: true },
-          );
-          hasWrites = true;
+          orphanLocationIds.push(locDoc.id);
         }
+      }
+
+      // Also heal local-only orphan locations that never reached Firestore
+      for (const loc of localState.locations) {
+        const hasOpenOrder =
+          openOrderLocationIds.has(loc.id) ||
+          (typeof loc.activeOrderId === 'string' && openOrderIds.has(loc.activeOrderId));
+        if (loc.status !== 'libre' && !hasOpenOrder && !orphanLocationIds.includes(loc.id)) {
+          orphanLocationIds.push(loc.id);
+        }
+      }
+
+      for (const orphanId of orphanLocationIds) {
+        await this.releaseLocation(orphanId);
       }
 
       if (existingMenu.empty) {
@@ -750,6 +754,16 @@ export class FirebasePosRepository implements PosRepository {
 
   async requestCheck(locationId: string): Promise<void> {
     await this.local.requestCheck(locationId);
+    const loc = this.local.getState().locations.find((l) => l.id === locationId);
+    if (loc) {
+      this.commitNonBlocking(
+        setDoc(doc(this.db, 'locations', loc.id), stripUndefined(loc), { merge: true }),
+      );
+    }
+  }
+
+  async releaseLocation(locationId: string): Promise<void> {
+    await this.local.releaseLocation(locationId);
     const loc = this.local.getState().locations.find((l) => l.id === locationId);
     if (loc) {
       this.commitNonBlocking(

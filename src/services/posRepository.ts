@@ -62,6 +62,7 @@ export interface PosRepository {
   updateComandaStatus(comandaId: string, status: ComandaStatus): Promise<void>;
   acknowledgeKitchenReady(locationId: string): Promise<void>;
   requestCheck(locationId: string): Promise<void>;
+  releaseLocation(locationId: string): Promise<void>;
   voidOrderItem(
     orderId: string,
     itemId: string,
@@ -597,6 +598,26 @@ export class LocalPosRepository implements PosRepository {
 
     const updatedLocations = this.state.locations.map((loc) =>
       loc.id === locationId ? { ...loc, status: 'por_cobrar' as const } : loc,
+    );
+
+    this.commit({
+      ...this.state,
+      locations: updatedLocations,
+    });
+  }
+
+  async releaseLocation(locationId: string): Promise<void> {
+    const updatedLocations = this.state.locations.map((loc) =>
+      loc.id === locationId
+        ? {
+            ...loc,
+            status: 'libre' as const,
+            activeOrderId: null,
+            kitchenReadyAlert: false,
+            pendingSync: false,
+            preFacturaReady: false,
+          }
+        : loc,
     );
 
     this.commit({
