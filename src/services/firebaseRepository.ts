@@ -2,6 +2,7 @@ import { getApp, getApps, initializeApp, type FirebaseOptions } from 'firebase/a
 import {
   collection,
   doc,
+  getDoc,
   getDocs,
   getFirestore,
   initializeFirestore,
@@ -19,6 +20,7 @@ import type {
   ComandaStatus,
   Ingredient,
   InventoryMovement,
+  Location,
   MenuItem,
   Order,
   PaymentEntry,
@@ -38,6 +40,59 @@ import {
   type SubmitComandaInput,
   type SubmitComandaResult,
 } from './posRepository';
+import { createInitialPosState } from './seedData';
+
+/**
+ * Recursively removes `undefined` properties before writing to Firestore
+ * (Firestore rejects objects containing explicit `undefined` values).
+ */
+export function stripUndefined<T>(value: T): T {
+  if (Array.isArray(value)) {
+    return value.map((item) => stripUndefined(item)) as unknown as T;
+  }
+  if (value !== null && typeof value === 'object') {
+    const cleaned: Record<string, unknown> = {};
+    for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
+      if (entry !== undefined) {
+        cleaned[key] = stripUndefined(entry);
+      }
+    }
+    return cleaned as T;
+  }
+  return value;
+}
+
+/**
+ * Merges incoming Firestore locations over the canonical 10 mesas + 18 toldos baseline
+ * so a partial cloud snapshot can never hide the rest of the floor grid, while keeping
+ * unsynced local offline edits intact.
+ */
+export function mergeLocationsWithBaseline(
+  remoteLocations: Location[],
+  currentLocations: Location[],
+): Location[] {
+  const baseline = createInitialPosState().locations;
+  const pendingLocalById = new Map(
+    currentLocations
+      .filter((loc) => loc.pendingSync === true)
+      .map((loc) => [loc.id, loc]),
+  );
+
+  const merged = new Map<string, Location>();
+  for (const loc of baseline) {
+    merged.set(loc.id, loc);
+  }
+  for (const loc of currentLocations) {
+    merged.set(loc.id, loc);
+  }
+  for (const loc of remoteLocations) {
+    merged.set(loc.id, pendingLocalById.get(loc.id) ?? loc);
+  }
+
+  return Array.from(merged.values()).sort(
+    (a, b) => a.zone.localeCompare(b.zone) || a.number - b.number,
+  );
+}
 
 interface ImportMetaWithEnv {
   env?: Record<string, string | undefined>;
@@ -101,38 +156,121 @@ export class FirebasePosRepository implements PosRepository {
 
   private async ensureInitialCloudSeed(): Promise<void> {
     try {
-      const existingLocations = await getDocs(collection(this.db, 'locations'));
-      if (!existingLocations.empty) {
-        return;
-      }
-      const state = this.local.getState();
+      const [
+        existingLocations,
+        existingOrders,
+        existingMenu,
+        existingIngredients,
+        existingUsers,
+        existingShifts,
+        existingAppSettings,
+        existingPublicSettings,
+      ] = await Promise.all([
+        getDocs(collection(this.db, 'locations')),
+        getDocs(collection(this.db, 'orders')),
+        getDocs(collection(this.db, 'menu')),
+        getDocs(collection(this.db, 'ingredients')),
+        getDocs(collection(this.db, 'users')),
+        getDocs(collection(this.db, 'shifts')),
+        getDoc(doc(this.db, 'settings', 'app')),
+        getDoc(doc(this.db, 'settings', 'public')),
+      ]);
+
+      const baseline = createInitialPosState();
+      const localState = this.local.getState();
+      const existingLocationIds = new Set(existingLocations.docs.map((d) => d.id));
       const batch = writeBatch(this.db);
-      for (const loc of state.locations) {
-        batch.set(doc(this.db, 'locations', loc.id), loc, { merge: true });
+      let hasWrites = false;
+
+      // Seed any missing canonical locations (10 mesas + 18 toldos) without overwriting existing ones
+      for (const loc of baseline.locations) {
+        if (!existingLocationIds.has(loc.id)) {
+          batch.set(doc(this.db, 'locations', loc.id), stripUndefined(loc), { merge: true });
+          hasWrites = true;
+        }
       }
-      for (const item of state.menu) {
-        batch.set(doc(this.db, 'menu', item.id), item, { merge: true });
+
+      // Heal orphaned occupied locations if the orders collection is completely empty
+      if (existingOrders.empty) {
+        for (const locDoc of existingLocations.docs) {
+          const data = locDoc.data() as Partial<Location>;
+          if (data.status && data.status !== 'libre') {
+            batch.set(
+              doc(this.db, 'locations', locDoc.id),
+              {
+                status: 'libre',
+                activeOrderId: null,
+                kitchenReadyAlert: false,
+                pendingSync: false,
+                preFacturaReady: false,
+              },
+              { merge: true },
+            );
+            hasWrites = true;
+          }
+        }
       }
-      for (const ing of state.ingredients) {
-        batch.set(doc(this.db, 'ingredients', ing.id), ing, { merge: true });
+
+      if (existingMenu.empty) {
+        const seedMenu = localState.menu.length > 0 ? localState.menu : baseline.menu;
+        for (const item of seedMenu) {
+          batch.set(doc(this.db, 'menu', item.id), stripUndefined(item), { merge: true });
+        }
+        hasWrites = true;
       }
-      for (const user of state.users) {
-        batch.set(doc(this.db, 'users', user.id), user, { merge: true });
+
+      if (existingIngredients.empty) {
+        const seedIngredients =
+          localState.ingredients.length > 0 ? localState.ingredients : baseline.ingredients;
+        for (const ing of seedIngredients) {
+          batch.set(doc(this.db, 'ingredients', ing.id), stripUndefined(ing), { merge: true });
+        }
+        hasWrites = true;
       }
-      for (const shift of state.shifts) {
-        batch.set(doc(this.db, 'shifts', shift.id), shift, { merge: true });
+
+      if (existingUsers.empty) {
+        const seedUsers = localState.users.length > 0 ? localState.users : baseline.users;
+        for (const user of seedUsers) {
+          batch.set(doc(this.db, 'users', user.id), stripUndefined(user), { merge: true });
+        }
+        hasWrites = true;
       }
-      batch.set(doc(this.db, 'settings', 'app'), state.settings, { merge: true });
-      batch.set(
-        doc(this.db, 'settings', 'public'),
-        {
-          restaurantName: state.settings.printer.restaurantName,
-          printer: state.settings.printer,
-          updatedAt: new Date().toISOString(),
-        },
-        { merge: true },
-      );
-      this.commitNonBlocking(batch.commit());
+
+      if (existingShifts.empty) {
+        const seedShifts = localState.shifts.length > 0 ? localState.shifts : baseline.shifts;
+        for (const shift of seedShifts) {
+          batch.set(doc(this.db, 'shifts', shift.id), stripUndefined(shift), { merge: true });
+        }
+        hasWrites = true;
+      }
+
+      const seedSettings = localState.settings ?? baseline.settings;
+      if (!existingAppSettings.exists()) {
+        batch.set(doc(this.db, 'settings', 'app'), stripUndefined(seedSettings), {
+          merge: true,
+        });
+        hasWrites = true;
+      }
+
+      if (!existingPublicSettings.exists()) {
+        batch.set(
+          doc(this.db, 'settings', 'public'),
+          stripUndefined({
+            restaurantName: seedSettings.printer.restaurantName,
+            printer: seedSettings.printer,
+            exchangeRate: seedSettings.exchangeRate,
+            exchangeRateUpdatedAt: seedSettings.exchangeRateUpdatedAt,
+            exchangeRateSource: seedSettings.exchangeRateSource,
+            updatedAt: new Date().toISOString(),
+          }),
+          { merge: true },
+        );
+        hasWrites = true;
+      }
+
+      if (hasWrites) {
+        this.commitNonBlocking(batch.commit());
+      }
     } catch {
       // Offline or rules not provisioned yet — local state remains usable
     }
@@ -172,16 +310,12 @@ export class FirebasePosRepository implements PosRepository {
         onSnapshot(collection(this.db, 'locations'), (snap) => {
           if (snap.empty) return;
           const current = this.local.getState();
-          const pendingLocalById = new Map(
-            current.locations
-              .filter((loc) => loc.pendingSync === true)
-              .map((loc) => [loc.id, loc]),
+          const remoteLocations = snap.docs.map((d) => d.data() as Location);
+          const mergedLocations = mergeLocationsWithBaseline(
+            remoteLocations,
+            current.locations,
           );
-          const remoteLocations = snap.docs
-            .map((d) => d.data() as PosState['locations'][number])
-            .map((loc) => pendingLocalById.get(loc.id) ?? loc)
-            .sort((a, b) => a.zone.localeCompare(b.zone) || a.number - b.number);
-          this.local.replaceState({ ...current, locations: remoteLocations });
+          this.local.replaceState({ ...current, locations: mergedLocations });
         }),
       );
 
@@ -248,6 +382,20 @@ export class FirebasePosRepository implements PosRepository {
         const pendingLocal = current.comandas.filter((c) => c.pendingSync === true);
         if (snap.empty && pendingLocal.length === 0) return;
 
+        const prevStatusById = new Map(current.comandas.map((c) => [c.id, c.status]));
+        const newlyReadyLocationIds = new Set<string>();
+        for (const comanda of remoteComandas) {
+          const prevStatus = prevStatusById.get(comanda.id);
+          if (
+            comanda.status === 'lista' &&
+            comanda.isVoidAlert !== true &&
+            prevStatus !== undefined &&
+            prevStatus !== 'lista'
+          ) {
+            newlyReadyLocationIds.add(comanda.locationId);
+          }
+        }
+
         const pendingMap = new Map(pendingLocal.map((c) => [c.id, c]));
         const remoteIds = new Set(remoteComandas.map((c) => c.id));
         const merged = [
@@ -255,7 +403,20 @@ export class FirebasePosRepository implements PosRepository {
           ...pendingLocal.filter((c) => !remoteIds.has(c.id)),
         ].sort((a, b) => a.sequenceNumber - b.sequenceNumber);
 
-        this.local.replaceState({ ...current, comandas: merged });
+        const nextLocations =
+          newlyReadyLocationIds.size > 0 && role !== 'cocina'
+            ? current.locations.map((loc) =>
+                newlyReadyLocationIds.has(loc.id) && loc.status !== 'libre'
+                  ? { ...loc, kitchenReadyAlert: true }
+                  : loc,
+              )
+            : current.locations;
+
+        this.local.replaceState({
+          ...current,
+          locations: nextLocations,
+          comandas: merged,
+        });
       }),
     );
 
@@ -286,12 +447,24 @@ export class FirebasePosRepository implements PosRepository {
         const data = snap.data() as Partial<{
           restaurantName: string;
           printer: PrinterConfig;
+          exchangeRate: number;
+          exchangeRateUpdatedAt: string;
+          exchangeRateSource: string;
         }>;
         const current = this.local.getState();
         this.local.replaceState({
           ...current,
           settings: {
             ...current.settings,
+            ...(typeof data.exchangeRate === 'number' && data.exchangeRate > 0
+              ? { exchangeRate: data.exchangeRate }
+              : {}),
+            ...(data.exchangeRateUpdatedAt
+              ? { exchangeRateUpdatedAt: data.exchangeRateUpdatedAt }
+              : {}),
+            ...(data.exchangeRateSource !== undefined
+              ? { exchangeRateSource: data.exchangeRateSource }
+              : {}),
             printer: {
               ...current.settings.printer,
               ...(data.printer ?? {}),
@@ -403,19 +576,27 @@ export class FirebasePosRepository implements PosRepository {
     const location = state.locations.find((l) => l.id === input.locationId);
     const batch = writeBatch(this.db);
 
-    batch.set(doc(this.db, 'orders', result.order.id), result.order, { merge: true });
+    batch.set(doc(this.db, 'orders', result.order.id), stripUndefined(result.order), {
+      merge: true,
+    });
     if (location) {
-      batch.set(doc(this.db, 'locations', location.id), location, { merge: true });
+      batch.set(doc(this.db, 'locations', location.id), stripUndefined(location), {
+        merge: true,
+      });
     }
     if (result.comanda) {
-      batch.set(doc(this.db, 'comandas', result.comanda.id), result.comanda, {
-        merge: true,
-      });
+      batch.set(
+        doc(this.db, 'comandas', result.comanda.id),
+        stripUndefined(result.comanda),
+        { merge: true },
+      );
     }
     if (result.printJob) {
-      batch.set(doc(this.db, 'printJobs', result.printJob.id), result.printJob, {
-        merge: true,
-      });
+      batch.set(
+        doc(this.db, 'printJobs', result.printJob.id),
+        stripUndefined(result.printJob),
+        { merge: true },
+      );
     }
 
     if (this.isAdminWriter()) {
@@ -423,14 +604,18 @@ export class FirebasePosRepository implements PosRepository {
       for (const movement of state.movements) {
         if (!prevMovIds.has(movement.id)) {
           touchedIngIds.add(movement.ingredientId);
-          batch.set(doc(this.db, 'inventoryMovements', movement.id), movement, {
-            merge: true,
-          });
+          batch.set(
+            doc(this.db, 'inventoryMovements', movement.id),
+            stripUndefined(movement),
+            { merge: true },
+          );
         }
       }
       for (const ing of state.ingredients) {
         if (touchedIngIds.has(ing.id)) {
-          batch.set(doc(this.db, 'ingredients', ing.id), ing, { merge: true });
+          batch.set(doc(this.db, 'ingredients', ing.id), stripUndefined(ing), {
+            merge: true,
+          });
         }
       }
     }
@@ -457,7 +642,7 @@ export class FirebasePosRepository implements PosRepository {
 
     for (const loc of nextState.locations) {
       if (pendingLocationIds.has(loc.id)) {
-        batch.set(doc(this.db, 'locations', loc.id), loc, { merge: true });
+        batch.set(doc(this.db, 'locations', loc.id), stripUndefined(loc), { merge: true });
         if (loc.activeOrderId) {
           touchedOrderIds.add(loc.activeOrderId);
         }
@@ -466,7 +651,9 @@ export class FirebasePosRepository implements PosRepository {
 
     for (const comanda of nextState.comandas) {
       if (pendingComandaIds.has(comanda.id)) {
-        batch.set(doc(this.db, 'comandas', comanda.id), comanda, { merge: true });
+        batch.set(doc(this.db, 'comandas', comanda.id), stripUndefined(comanda), {
+          merge: true,
+        });
         touchedOrderIds.add(comanda.orderId);
       }
     }
@@ -476,13 +663,17 @@ export class FirebasePosRepository implements PosRepository {
         touchedOrderIds.has(order.id) ||
         order.items.some((item) => pendingComandaIds.has(item.comandaId))
       ) {
-        batch.set(doc(this.db, 'orders', order.id), order, { merge: true });
+        batch.set(doc(this.db, 'orders', order.id), stripUndefined(order), {
+          merge: true,
+        });
       }
     }
 
     for (const job of nextState.printJobs) {
       if (pendingComandaIds.has(job.referenceId)) {
-        batch.set(doc(this.db, 'printJobs', job.id), job, { merge: true });
+        batch.set(doc(this.db, 'printJobs', job.id), stripUndefined(job), {
+          merge: true,
+        });
       }
     }
 
@@ -495,14 +686,18 @@ export class FirebasePosRepository implements PosRepository {
             pendingComandaIds.has(movement.referenceId));
         if (isPendingMovement) {
           touchedIngIds.add(movement.ingredientId);
-          batch.set(doc(this.db, 'inventoryMovements', movement.id), movement, {
-            merge: true,
-          });
+          batch.set(
+            doc(this.db, 'inventoryMovements', movement.id),
+            stripUndefined(movement),
+            { merge: true },
+          );
         }
       }
       for (const ing of nextState.ingredients) {
         if (touchedIngIds.has(ing.id)) {
-          batch.set(doc(this.db, 'ingredients', ing.id), ing, { merge: true });
+          batch.set(doc(this.db, 'ingredients', ing.id), stripUndefined(ing), {
+            merge: true,
+          });
         }
       }
     }
@@ -517,11 +712,14 @@ export class FirebasePosRepository implements PosRepository {
     if (!comanda) return;
 
     const batch = writeBatch(this.db);
-    batch.set(doc(this.db, 'comandas', comanda.id), comanda, { merge: true });
-    if (status === 'lista') {
+    batch.set(doc(this.db, 'comandas', comanda.id), stripUndefined(comanda), {
+      merge: true,
+    });
+    // Cocina station has no write permission on /locations; Mesonero/Caja listeners derive kitchenReadyAlert from comandas
+    if (status === 'lista' && this.stationRole !== 'cocina') {
       const loc = state.locations.find((l) => l.id === comanda.locationId);
       if (loc) {
-        batch.set(doc(this.db, 'locations', loc.id), loc, { merge: true });
+        batch.set(doc(this.db, 'locations', loc.id), stripUndefined(loc), { merge: true });
       }
     }
     this.commitNonBlocking(batch.commit());
@@ -532,7 +730,7 @@ export class FirebasePosRepository implements PosRepository {
     const loc = this.local.getState().locations.find((l) => l.id === locationId);
     if (loc) {
       this.commitNonBlocking(
-        setDoc(doc(this.db, 'locations', loc.id), loc, { merge: true }),
+        setDoc(doc(this.db, 'locations', loc.id), stripUndefined(loc), { merge: true }),
       );
     }
   }
@@ -542,7 +740,7 @@ export class FirebasePosRepository implements PosRepository {
     const loc = this.local.getState().locations.find((l) => l.id === locationId);
     if (loc) {
       this.commitNonBlocking(
-        setDoc(doc(this.db, 'locations', loc.id), loc, { merge: true }),
+        setDoc(doc(this.db, 'locations', loc.id), stripUndefined(loc), { merge: true }),
       );
     }
   }
@@ -565,16 +763,20 @@ export class FirebasePosRepository implements PosRepository {
 
     const batch = writeBatch(this.db);
     if (order) {
-      batch.set(doc(this.db, 'orders', order.id), order, { merge: true });
+      batch.set(doc(this.db, 'orders', order.id), stripUndefined(order), { merge: true });
     }
     for (const comanda of state.comandas) {
       if (!prevComandaIds.has(comanda.id)) {
-        batch.set(doc(this.db, 'comandas', comanda.id), comanda, { merge: true });
+        batch.set(doc(this.db, 'comandas', comanda.id), stripUndefined(comanda), {
+          merge: true,
+        });
       }
     }
     for (const job of state.printJobs) {
       if (!prevJobIds.has(job.id)) {
-        batch.set(doc(this.db, 'printJobs', job.id), job, { merge: true });
+        batch.set(doc(this.db, 'printJobs', job.id), stripUndefined(job), {
+          merge: true,
+        });
       }
     }
 
@@ -583,14 +785,18 @@ export class FirebasePosRepository implements PosRepository {
       for (const movement of state.movements) {
         if (!prevMovIds.has(movement.id)) {
           touchedIngIds.add(movement.ingredientId);
-          batch.set(doc(this.db, 'inventoryMovements', movement.id), movement, {
-            merge: true,
-          });
+          batch.set(
+            doc(this.db, 'inventoryMovements', movement.id),
+            stripUndefined(movement),
+            { merge: true },
+          );
         }
       }
       for (const ing of state.ingredients) {
         if (touchedIngIds.has(ing.id)) {
-          batch.set(doc(this.db, 'ingredients', ing.id), ing, { merge: true });
+          batch.set(doc(this.db, 'ingredients', ing.id), stripUndefined(ing), {
+            merge: true,
+          });
         }
       }
     }
@@ -605,12 +811,14 @@ export class FirebasePosRepository implements PosRepository {
     const shift = state.shifts.find((s) => s.id === settled.shiftId);
 
     const batch = writeBatch(this.db);
-    batch.set(doc(this.db, 'orders', settled.id), settled, { merge: true });
+    batch.set(doc(this.db, 'orders', settled.id), stripUndefined(settled), {
+      merge: true,
+    });
     if (loc) {
-      batch.set(doc(this.db, 'locations', loc.id), loc, { merge: true });
+      batch.set(doc(this.db, 'locations', loc.id), stripUndefined(loc), { merge: true });
     }
     if (shift) {
-      batch.set(doc(this.db, 'shifts', shift.id), shift, { merge: true });
+      batch.set(doc(this.db, 'shifts', shift.id), stripUndefined(shift), { merge: true });
     }
     this.commitNonBlocking(batch.commit());
     return settled;
@@ -619,7 +827,7 @@ export class FirebasePosRepository implements PosRepository {
   async openShift(userId: string): Promise<Shift> {
     const shift = await this.local.openShift(userId);
     this.commitNonBlocking(
-      setDoc(doc(this.db, 'shifts', shift.id), shift, { merge: true }),
+      setDoc(doc(this.db, 'shifts', shift.id), stripUndefined(shift), { merge: true }),
     );
     return shift;
   }
@@ -627,8 +835,10 @@ export class FirebasePosRepository implements PosRepository {
   async closeShift(userId: string, notes?: string): Promise<CloseShiftResult> {
     const res = await this.local.closeShift(userId, notes);
     const batch = writeBatch(this.db);
-    batch.set(doc(this.db, 'shifts', res.shift.id), res.shift, { merge: true });
-    batch.set(doc(this.db, 'printJobs', res.printJob.id), res.printJob, {
+    batch.set(doc(this.db, 'shifts', res.shift.id), stripUndefined(res.shift), {
+      merge: true,
+    });
+    batch.set(doc(this.db, 'printJobs', res.printJob.id), stripUndefined(res.printJob), {
       merge: true,
     });
     this.commitNonBlocking(batch.commit());
@@ -653,12 +863,14 @@ export class FirebasePosRepository implements PosRepository {
 
     const state = this.local.getState();
     const batch = writeBatch(this.db);
-    batch.set(doc(this.db, 'ingredients', ing.id), ing, { merge: true });
+    batch.set(doc(this.db, 'ingredients', ing.id), stripUndefined(ing), { merge: true });
     for (const movement of state.movements) {
       if (!prevMovIds.has(movement.id)) {
-        batch.set(doc(this.db, 'inventoryMovements', movement.id), movement, {
-          merge: true,
-        });
+        batch.set(
+          doc(this.db, 'inventoryMovements', movement.id),
+          stripUndefined(movement),
+          { merge: true },
+        );
       }
     }
     this.commitNonBlocking(batch.commit());
@@ -670,7 +882,9 @@ export class FirebasePosRepository implements PosRepository {
   ): Promise<Ingredient> {
     const saved = await this.local.saveIngredient(ingredient);
     this.commitNonBlocking(
-      setDoc(doc(this.db, 'ingredients', saved.id), saved, { merge: true }),
+      setDoc(doc(this.db, 'ingredients', saved.id), stripUndefined(saved), {
+        merge: true,
+      }),
     );
     return saved;
   }
@@ -680,7 +894,7 @@ export class FirebasePosRepository implements PosRepository {
   ): Promise<MenuItem> {
     const saved = await this.local.saveMenuItem(item);
     this.commitNonBlocking(
-      setDoc(doc(this.db, 'menu', saved.id), saved, { merge: true }),
+      setDoc(doc(this.db, 'menu', saved.id), stripUndefined(saved), { merge: true }),
     );
     return saved;
   }
@@ -691,19 +905,38 @@ export class FirebasePosRepository implements PosRepository {
   ): Promise<MenuItem> {
     const updated = await this.local.toggleMenuOutOfStock(menuItemId, outOfStock);
     this.commitNonBlocking(
-      setDoc(doc(this.db, 'menu', updated.id), updated, { merge: true }),
+      setDoc(doc(this.db, 'menu', updated.id), stripUndefined(updated), { merge: true }),
     );
     return updated;
   }
 
   async updateExchangeRate(rate: number, source = 'Manual'): Promise<void> {
     await this.local.updateExchangeRate(rate, source);
+    if (!this.isAdminWriter()) {
+      return;
+    }
     const state = this.local.getState();
     const batch = writeBatch(this.db);
-    batch.set(doc(this.db, 'settings', 'app'), state.settings, { merge: true });
+    batch.set(doc(this.db, 'settings', 'app'), stripUndefined(state.settings), {
+      merge: true,
+    });
+    batch.set(
+      doc(this.db, 'settings', 'public'),
+      stripUndefined({
+        restaurantName: state.settings.printer.restaurantName,
+        printer: state.settings.printer,
+        exchangeRate: state.settings.exchangeRate,
+        exchangeRateUpdatedAt: state.settings.exchangeRateUpdatedAt,
+        exchangeRateSource: state.settings.exchangeRateSource,
+        updatedAt: new Date().toISOString(),
+      }),
+      { merge: true },
+    );
     for (const order of state.orders) {
       if (order.status === 'abierta') {
-        batch.set(doc(this.db, 'orders', order.id), order, { merge: true });
+        batch.set(doc(this.db, 'orders', order.id), stripUndefined(order), {
+          merge: true,
+        });
       }
     }
     this.commitNonBlocking(batch.commit());
@@ -714,13 +947,14 @@ export class FirebasePosRepository implements PosRepository {
   ): Promise<UserProfile> {
     const saved = await this.local.saveUser(user);
     this.commitNonBlocking(
-      setDoc(doc(this.db, 'users', saved.id), saved, { merge: true }),
+      setDoc(doc(this.db, 'users', saved.id), stripUndefined(saved), { merge: true }),
     );
     return saved;
   }
 
   async savePrinterConfig(printer: PrinterConfig): Promise<void> {
     await this.local.savePrinterConfig(printer);
+    const state = this.local.getState();
     const normalizedPrinter: PrinterConfig = {
       restaurantName: printer.restaurantName,
       ip: printer.ip,
@@ -731,15 +965,18 @@ export class FirebasePosRepository implements PosRepository {
     const batch = writeBatch(this.db);
     batch.set(
       doc(this.db, 'settings', 'public'),
-      {
+      stripUndefined({
         restaurantName: normalizedPrinter.restaurantName,
         printer: normalizedPrinter,
+        exchangeRate: state.settings.exchangeRate,
+        exchangeRateUpdatedAt: state.settings.exchangeRateUpdatedAt,
+        exchangeRateSource: state.settings.exchangeRateSource,
         updatedAt: new Date().toISOString(),
-      },
+      }),
       { merge: true },
     );
     if (this.isAdminWriter()) {
-      batch.set(doc(this.db, 'settings', 'app'), this.local.getState().settings, {
+      batch.set(doc(this.db, 'settings', 'app'), stripUndefined(state.settings), {
         merge: true,
       });
     }
@@ -755,12 +992,14 @@ export class FirebasePosRepository implements PosRepository {
       : undefined;
 
     const batch = writeBatch(this.db);
-    batch.set(doc(this.db, 'printJobs', job.id), job, { merge: true });
+    batch.set(doc(this.db, 'printJobs', job.id), stripUndefined(job), { merge: true });
     if (order) {
-      batch.set(doc(this.db, 'orders', order.id), order, { merge: true });
+      batch.set(doc(this.db, 'orders', order.id), stripUndefined(order), { merge: true });
     }
     if (location) {
-      batch.set(doc(this.db, 'locations', location.id), location, { merge: true });
+      batch.set(doc(this.db, 'locations', location.id), stripUndefined(location), {
+        merge: true,
+      });
     }
     this.commitNonBlocking(batch.commit());
     return job;
@@ -769,7 +1008,7 @@ export class FirebasePosRepository implements PosRepository {
   async createTestPrintJob(): Promise<PrintJob> {
     const job = await this.local.createTestPrintJob();
     this.commitNonBlocking(
-      setDoc(doc(this.db, 'printJobs', job.id), job, { merge: true }),
+      setDoc(doc(this.db, 'printJobs', job.id), stripUndefined(job), { merge: true }),
     );
     return job;
   }
@@ -785,11 +1024,13 @@ export class FirebasePosRepository implements PosRepository {
     if (!job) return;
 
     const batch = writeBatch(this.db);
-    batch.set(doc(this.db, 'printJobs', job.id), job, { merge: true });
+    batch.set(doc(this.db, 'printJobs', job.id), stripUndefined(job), { merge: true });
     if (job.type === 'comanda') {
       const comanda = state.comandas.find((c) => c.id === job.referenceId);
       if (comanda) {
-        batch.set(doc(this.db, 'comandas', comanda.id), comanda, { merge: true });
+        batch.set(doc(this.db, 'comandas', comanda.id), stripUndefined(comanda), {
+          merge: true,
+        });
       }
     }
     this.commitNonBlocking(batch.commit());
@@ -800,28 +1041,33 @@ export class FirebasePosRepository implements PosRepository {
     const state = this.local.getState();
     const batch = writeBatch(this.db);
     for (const loc of state.locations) {
-      batch.set(doc(this.db, 'locations', loc.id), loc);
+      batch.set(doc(this.db, 'locations', loc.id), stripUndefined(loc));
     }
     for (const item of state.menu) {
-      batch.set(doc(this.db, 'menu', item.id), item);
+      batch.set(doc(this.db, 'menu', item.id), stripUndefined(item));
     }
     for (const ing of state.ingredients) {
-      batch.set(doc(this.db, 'ingredients', ing.id), ing);
+      batch.set(doc(this.db, 'ingredients', ing.id), stripUndefined(ing));
     }
     for (const user of state.users) {
-      batch.set(doc(this.db, 'users', user.id), user);
+      batch.set(doc(this.db, 'users', user.id), stripUndefined(user));
     }
     for (const shift of state.shifts) {
-      batch.set(doc(this.db, 'shifts', shift.id), shift);
+      batch.set(doc(this.db, 'shifts', shift.id), stripUndefined(shift));
     }
-    batch.set(doc(this.db, 'settings', 'app'), state.settings, { merge: true });
+    batch.set(doc(this.db, 'settings', 'app'), stripUndefined(state.settings), {
+      merge: true,
+    });
     batch.set(
       doc(this.db, 'settings', 'public'),
-      {
+      stripUndefined({
         restaurantName: state.settings.printer.restaurantName,
         printer: state.settings.printer,
+        exchangeRate: state.settings.exchangeRate,
+        exchangeRateUpdatedAt: state.settings.exchangeRateUpdatedAt,
+        exchangeRateSource: state.settings.exchangeRateSource,
         updatedAt: new Date().toISOString(),
-      },
+      }),
       { merge: true },
     );
     this.commitNonBlocking(batch.commit());

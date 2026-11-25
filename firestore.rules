@@ -42,6 +42,7 @@ rules_version = '2';
 //   - activeOrderId: string | null (optional, 1..128 chars if string)
 //   - pendingSync: bool (optional)
 //   - kitchenReadyAlert: bool (optional)
+//   - preFacturaReady: bool (optional, caja_admin ONLY)
 //   - updatedAt: timestamp | ISO-8601 string (optional)
 //
 // Collection: /menu/{menuItemId}
@@ -67,13 +68,14 @@ rules_version = '2';
 //   - locationId: string (required, 1..64 chars, immutable)
 //   - locationLabel: string (optional, 1..40 chars, immutable for non-admin)
 //   - zone: string (optional, enum: 'mesas' | 'toldos', immutable for non-admin)
+//   - sequenceNumber: int (optional, 1..999999, immutable for non-admin)
 //   - ticketNumber: int (optional, 1..999999, immutable for non-admin)
 //   - roundNumber: int (optional, 1..999, immutable for non-admin)
 //   - waiterId: string (optional, 1..128 chars, immutable for non-admin)
 //   - waiterName: string (optional, 1..60 chars, immutable for non-admin)
 //   - items: list of maps (required, 1..50 items, immutable for cocina & mesonero)
 //   - status: string (required, enum: 'pendiente' | 'en_preparacion' | 'lista')
-//   - isVoidAlert: bool (required; must be false for mesonero create, immutable for non-admin)
+//   - isVoidAlert: bool (optional; must be false/absent for mesonero create, immutable for non-admin)
 //   - voidReason: string (optional, 0..200 chars)
 //   - printStatus: string (optional, enum: 'pending' | 'printing' | 'printed' | 'printed_locally' | 'failed')
 //   - pendingSync: bool (optional)
@@ -91,14 +93,20 @@ rules_version = '2';
 //   - status: string (required, enum: 'abierta' | 'cerrada')
 //   - items: list of maps (required, 0..200 entries)
 //   - payments: list of maps (required, 0..20 entries; must be empty for mesonero)
+//   - subtotalUsd: number (optional, 0..100000; frozen once status == 'cerrada')
+//   - ivaRate: number (optional, 0..1; frozen once status == 'cerrada')
+//   - ivaUsd: number (optional, 0..100000; frozen once status == 'cerrada')
+//   - ivaBs: number (optional, 0..1000000000; frozen once status == 'cerrada')
 //   - totalUsd: number (required, 0..100000)
 //   - totalBs: number (optional, 0..1000000000)
 //   - exchangeRate: number | null (optional, > 0..1000000; frozen once status == 'cerrada')
 //   - voidedCount: int (optional, 0..200; immutable for mesonero)
 //   - waiterId: string (optional, 1..128 chars)
 //   - waiterName: string (optional, 1..60 chars)
-//   - shiftId: string | null (optional, 1..128 chars)
+//   - shiftId: string | null (optional, 0..128 chars; immutable for mesonero)
+//   - preFactura: map | null (optional; must be null/absent for mesonero create, immutable for mesonero)
 //   - pendingSync: bool (optional)
+//   - openedAt: timestamp | ISO-8601 string (optional, immutable once set)
 //   - createdAt: timestamp | ISO-8601 string (optional, immutable once set)
 //   - updatedAt: timestamp | ISO-8601 string (optional)
 //   - closedAt: timestamp | ISO-8601 string | null (optional)
@@ -127,13 +135,14 @@ rules_version = '2';
 //   - ingredientId: string (required, 1..64 chars, immutable)
 //   - ingredientName: string (optional, 1..100 chars)
 //   - type: string (required, enum: 'venta' | 'reposicion' | 'merma' | 'ajuste' |
-//                                   'anulacion' | 'restock' | 'sale' | 'waste' |
-//                                   'adjustment' | 'void_restock', immutable)
-//   - delta: number (required, != 0, -1000000..1000000, immutable)
+//                                   'anulacion' | 'anulacion_devolucion' | 'restock' |
+//                                   'sale' | 'waste' | 'adjustment' | 'void_restock', immutable)
+//   - delta: number (required, != 0 except 'merma' audit rows, -1000000..1000000, immutable)
 //   - unit: string (optional, enum: 'g' | 'kg' | 'ml' | 'L' | 'unidad')
 //   - stockAfter: number (optional, -1000000..10000000)
 //   - comandaId: string | null (optional, 1..128 chars, immutable)
 //   - orderId: string | null (optional, 1..128 chars, immutable)
+//   - referenceId: string | null (optional, 0..128 chars, immutable)
 //   - reason: string (optional, 0..300 chars)
 //   - userId: string (optional, 1..128 chars)
 //   - createdAt: timestamp | ISO-8601 string (required, immutable)
@@ -149,10 +158,13 @@ rules_version = '2';
 //   - closedBy: string | null (optional, 1..128 chars, immutable once cerrado)
 //   - exchangeRateAtClose: number | null (optional, > 0..1000000, immutable once cerrado)
 //   - orderCount: int (optional, 0..100000, immutable once cerrado)
+//   - ordersCount: int (optional, 0..100000, immutable once cerrado)
 //   - totalUsd: number (optional, 0..10000000, immutable once cerrado)
 //   - totalBs: number (optional, 0..10000000000, immutable once cerrado)
+//   - totalSalesUsd: number (optional, 0..10000000, immutable once cerrado)
+//   - totalSalesBs: number (optional, 0..10000000000, immutable once cerrado)
 //   - totalsByMethod: map (optional, keys in ['zelle','efectivo_usd','debito_punto','efectivo_bs'])
-//   - notes: string (optional, 0..500 chars)
+//   - notes: string | null (optional, 0..500 chars)
 //   - updatedAt: timestamp | ISO-8601 string (optional)
 //
 // Collection: /users/{userId}  [STRICTLY caja_admin ONLY — contains staff PINs]
@@ -167,9 +179,13 @@ rules_version = '2';
 //   - updatedAt: timestamp | ISO-8601 string (optional)
 //
 // Document: /settings/public  [Read: all active stations; Write: caja_admin ONLY]
-// Fields (strictly non-sensitive LAN print metadata — zero financial config):
+// Fields (non-sensitive LAN print metadata & public BCV rate for menu Bs conversion):
 //   - restaurantName: string (required, 1..100 chars)
-//   - printer: map (required: ip, port, optional paperWidthMm, autoPrintStation, enabled)
+//   - printer: map (required: ip, port; optional: restaurantName, autoPrintFromKitchen,
+//                   lanFallbackEnabled, paperWidthMm, autoPrintStation, enabled)
+//   - exchangeRate: number (optional, > 0..1000000)
+//   - exchangeRateUpdatedAt: timestamp | ISO-8601 string (optional)
+//   - exchangeRateSource: string (optional, 0..100 chars)
 //   - updatedAt: timestamp | ISO-8601 string (optional)
 //
 // Collection: /settings/{docId} (docId != 'public')  [STRICTLY caja_admin ONLY]
@@ -177,6 +193,7 @@ rules_version = '2';
 //   - restaurantName: string (optional, 1..100 chars)
 //   - exchangeRate: number (optional, > 0..1000000)
 //   - exchangeRateUpdatedAt: timestamp | ISO-8601 string (optional)
+//   - exchangeRateSource: string (optional, 0..100 chars)
 //   - printer: map (optional, same validated structure as public printer)
 //   - defaultCurrency: string (optional, enum: 'USD' | 'VES')
 //   - updatedAt: timestamp | ISO-8601 string (optional)
@@ -186,8 +203,13 @@ rules_version = '2';
 // Document ID: jobId (idempotent printJobId preventing duplicate 80mm tickets)
 // Fields:
 //   - id: string (required, == {jobId}, 1..128 chars, immutable)
-//   - type: string (required, enum: 'comanda' | 'anulacion' | 'precuenta' | 'cierre_caja' | 'test', immutable)
+//   - type: string (required, enum: 'comanda' | 'anulacion' | 'precuenta' | 'cierre' |
+//                                   'cierre_caja' | 'prueba' | 'test', immutable)
 //   - status: string (required, enum: 'pending' | 'printing' | 'printed' | 'printed_locally' | 'failed')
+//   - referenceId: string (optional, 0..128 chars, immutable for non-admin)
+//   - title: string (optional, 1..200 chars, immutable for non-admin)
+//   - textPreview: string (optional, 1..16384 chars, immutable for non-admin)
+//   - error: string | null (optional, 0..300 chars)
 //   - comandaId: string | null (optional, 1..128 chars, immutable)
 //   - orderId: string | null (optional, 1..128 chars, immutable)
 //   - shiftId: string | null (optional, 1..128 chars, immutable)
@@ -216,11 +238,6 @@ service cloud.firestore {
 
     function isOwner(userId) {
       return isAuthenticated() && request.auth.uid == userId;
-    }
-
-    function uidUnchanged() {
-      return !('uid' in request.resource.data) ||
-        request.resource.data.uid == request.auth.uid;
     }
 
     function uidNotModified() {
@@ -356,14 +373,45 @@ service cloud.firestore {
 
     function isValidPrinterConfig(printer) {
       return printer is map &&
-        hasOnlyAllowedFields(printer, ['ip', 'port', 'paperWidthMm', 'autoPrintStation', 'enabled']) &&
+        hasOnlyAllowedFields(printer, [
+          'restaurantName', 'ip', 'port',
+          'autoPrintFromKitchen', 'lanFallbackEnabled',
+          'paperWidthMm', 'autoPrintStation', 'enabled'
+        ]) &&
         hasRequiredFields(printer, ['ip', 'port']) &&
+        isOptionalString(printer, 'restaurantName', 1, 100) &&
         isValidString(printer.ip, 1, 64) &&
         printer.ip.matches("^[a-zA-Z0-9._-]+$") &&
         printer.port is int && printer.port >= 1 && printer.port <= 65535 &&
+        isOptionalBool(printer, 'autoPrintFromKitchen') &&
+        isOptionalBool(printer, 'lanFallbackEnabled') &&
         (!('paperWidthMm' in printer) || (printer.paperWidthMm is int && printer.paperWidthMm in [58, 80])) &&
         (!('autoPrintStation' in printer) || (printer.autoPrintStation is string && printer.autoPrintStation in ['cocina', 'emisor', 'caja_admin', 'manual'])) &&
         isOptionalBool(printer, 'enabled');
+    }
+
+    function isValidPreFactura(pf) {
+      return pf is map &&
+        hasOnlyAllowedFields(pf, [
+          'id', 'orderId', 'locationId', 'locationLabel', 'restaurantName',
+          'items', 'subtotalUsd', 'subtotalBs', 'ivaRate', 'ivaUsd', 'ivaBs',
+          'totalUsd', 'totalBs', 'exchangeRate', 'generatedAt'
+        ]) &&
+        isOptionalString(pf, 'id', 1, 128) &&
+        isOptionalString(pf, 'orderId', 1, 128) &&
+        isOptionalString(pf, 'locationId', 1, 64) &&
+        isOptionalString(pf, 'locationLabel', 1, 40) &&
+        isOptionalString(pf, 'restaurantName', 1, 100) &&
+        (!('items' in pf) || (pf.items is list && pf.items.size() <= 200 && (pf.items.size() == 0 || pf.items[0] is map))) &&
+        isOptionalNumberRange(pf, 'subtotalUsd', 0, 100000) &&
+        isOptionalNumberRange(pf, 'subtotalBs', 0, 1000000000) &&
+        isOptionalNumberRange(pf, 'ivaRate', 0, 1) &&
+        isOptionalNumberRange(pf, 'ivaUsd', 0, 100000) &&
+        isOptionalNumberRange(pf, 'ivaBs', 0, 1000000000) &&
+        isOptionalNumberRange(pf, 'totalUsd', 0, 100000) &&
+        isOptionalNumberRange(pf, 'totalBs', 0, 1000000000) &&
+        (!('exchangeRate' in pf) || (pf.exchangeRate is number && pf.exchangeRate > 0 && pf.exchangeRate <= 1000000)) &&
+        isOptionalTimestampOrIso(pf, 'generatedAt');
     }
 
     // ===============================================================
@@ -386,7 +434,7 @@ service cloud.firestore {
     function isValidLocation(data, locationId) {
       return hasOnlyAllowedFields(data, [
           'id', 'zone', 'number', 'label', 'status',
-          'activeOrderId', 'pendingSync', 'kitchenReadyAlert', 'updatedAt'
+          'activeOrderId', 'pendingSync', 'kitchenReadyAlert', 'preFacturaReady', 'updatedAt'
         ]) &&
         hasRequiredFields(data, ['id', 'zone', 'number', 'label', 'status']) &&
         isValidString(data.id, 1, 64) &&
@@ -398,6 +446,7 @@ service cloud.firestore {
         isNullableString(data, 'activeOrderId', 1, 128) &&
         isOptionalBool(data, 'pendingSync') &&
         isOptionalBool(data, 'kitchenReadyAlert') &&
+        isOptionalBool(data, 'preFacturaReady') &&
         isOptionalTimestampOrIso(data, 'updatedAt');
     }
 
@@ -424,24 +473,25 @@ service cloud.firestore {
     function isValidComanda(data, comandaId) {
       return hasOnlyAllowedFields(data, [
           'id', 'orderId', 'locationId', 'locationLabel', 'zone',
-          'ticketNumber', 'roundNumber', 'waiterId', 'waiterName',
+          'sequenceNumber', 'ticketNumber', 'roundNumber', 'waiterId', 'waiterName',
           'items', 'status', 'isVoidAlert', 'voidReason',
           'printStatus', 'pendingSync', 'createdAt', 'updatedAt', 'completedAt'
         ]) &&
-        hasRequiredFields(data, ['id', 'orderId', 'locationId', 'items', 'status', 'isVoidAlert']) &&
+        hasRequiredFields(data, ['id', 'orderId', 'locationId', 'items', 'status']) &&
         isValidString(data.id, 1, 128) &&
         data.id == comandaId &&
         isValidString(data.orderId, 1, 128) &&
         isValidString(data.locationId, 1, 64) &&
         isOptionalString(data, 'locationLabel', 1, 40) &&
         (!('zone' in data) || isValidZone(data.zone)) &&
+        isOptionalIntRange(data, 'sequenceNumber', 1, 999999) &&
         isOptionalIntRange(data, 'ticketNumber', 1, 999999) &&
         isOptionalIntRange(data, 'roundNumber', 1, 999) &&
         isOptionalString(data, 'waiterId', 1, 128) &&
         isOptionalString(data, 'waiterName', 1, 60) &&
         data.items is list && data.items.size() >= 1 && data.items.size() <= 50 && data.items[0] is map &&
         data.status in ['pendiente', 'en_preparacion', 'lista'] &&
-        data.isVoidAlert is bool &&
+        isOptionalBool(data, 'isVoidAlert') &&
         isOptionalString(data, 'voidReason', 0, 200) &&
         (!('printStatus' in data) || isValidPrintStatus(data.printStatus)) &&
         isOptionalBool(data, 'pendingSync') &&
@@ -453,9 +503,11 @@ service cloud.firestore {
     function isValidOrder(data, orderId) {
       return hasOnlyAllowedFields(data, [
           'id', 'locationId', 'locationLabel', 'zone', 'status',
-          'items', 'payments', 'totalUsd', 'totalBs', 'exchangeRate',
-          'voidedCount', 'waiterId', 'waiterName', 'shiftId',
-          'pendingSync', 'createdAt', 'updatedAt', 'closedAt', 'closedBy'
+          'items', 'payments',
+          'subtotalUsd', 'ivaRate', 'ivaUsd', 'ivaBs',
+          'totalUsd', 'totalBs', 'exchangeRate',
+          'voidedCount', 'waiterId', 'waiterName', 'shiftId', 'preFactura',
+          'pendingSync', 'openedAt', 'createdAt', 'updatedAt', 'closedAt', 'closedBy'
         ]) &&
         hasRequiredFields(data, ['id', 'locationId', 'status', 'items', 'payments', 'totalUsd']) &&
         isValidString(data.id, 1, 128) &&
@@ -466,14 +518,20 @@ service cloud.firestore {
         data.status in ['abierta', 'cerrada'] &&
         data.items is list && data.items.size() <= 200 && (data.items.size() == 0 || data.items[0] is map) &&
         data.payments is list && data.payments.size() <= 20 && (data.payments.size() == 0 || data.payments[0] is map) &&
+        isOptionalNumberRange(data, 'subtotalUsd', 0, 100000) &&
+        isOptionalNumberRange(data, 'ivaRate', 0, 1) &&
+        isOptionalNumberRange(data, 'ivaUsd', 0, 100000) &&
+        isOptionalNumberRange(data, 'ivaBs', 0, 1000000000) &&
         isValidNumberRange(data.totalUsd, 0, 100000) &&
         isOptionalNumberRange(data, 'totalBs', 0, 1000000000) &&
         (!('exchangeRate' in data) || data.exchangeRate == null || (data.exchangeRate is number && data.exchangeRate > 0 && data.exchangeRate <= 1000000)) &&
         isOptionalIntRange(data, 'voidedCount', 0, 200) &&
         isOptionalString(data, 'waiterId', 1, 128) &&
         isOptionalString(data, 'waiterName', 1, 60) &&
-        isNullableString(data, 'shiftId', 1, 128) &&
+        isNullableString(data, 'shiftId', 0, 128) &&
+        (!('preFactura' in data) || data.preFactura == null || isValidPreFactura(data.preFactura)) &&
         isOptionalBool(data, 'pendingSync') &&
+        isOptionalTimestampOrIso(data, 'openedAt') &&
         isOptionalTimestampOrIso(data, 'createdAt') &&
         isOptionalTimestampOrIso(data, 'updatedAt') &&
         isNullableTimestampOrIso(data, 'closedAt') &&
@@ -503,7 +561,8 @@ service cloud.firestore {
     function isValidInventoryMovement(data, movementId) {
       return hasOnlyAllowedFields(data, [
           'id', 'ingredientId', 'ingredientName', 'type', 'delta',
-          'unit', 'stockAfter', 'comandaId', 'orderId', 'reason', 'userId', 'createdAt'
+          'unit', 'stockAfter', 'comandaId', 'orderId', 'referenceId',
+          'reason', 'userId', 'createdAt'
         ]) &&
         hasRequiredFields(data, ['id', 'ingredientId', 'type', 'delta', 'createdAt']) &&
         isValidString(data.id, 1, 128) &&
@@ -511,15 +570,16 @@ service cloud.firestore {
         isValidString(data.ingredientId, 1, 64) &&
         isOptionalString(data, 'ingredientName', 1, 100) &&
         data.type in [
-          'venta', 'reposicion', 'merma', 'ajuste', 'anulacion',
+          'venta', 'reposicion', 'merma', 'ajuste', 'anulacion', 'anulacion_devolucion',
           'restock', 'sale', 'waste', 'adjustment', 'void_restock'
         ] &&
         isValidNumberRange(data.delta, -1000000, 1000000) &&
-        data.delta != 0 &&
+        (data.delta != 0 || data.type == 'merma') &&
         (!('unit' in data) || isValidUnit(data.unit)) &&
         isOptionalNumberRange(data, 'stockAfter', -1000000, 10000000) &&
         isNullableString(data, 'comandaId', 1, 128) &&
         isNullableString(data, 'orderId', 1, 128) &&
+        isNullableString(data, 'referenceId', 0, 128) &&
         isOptionalString(data, 'reason', 0, 300) &&
         isOptionalString(data, 'userId', 1, 128) &&
         isValidTimestampOrIso(data.createdAt);
@@ -528,7 +588,8 @@ service cloud.firestore {
     function isValidShift(data, shiftId) {
       return hasOnlyAllowedFields(data, [
           'id', 'status', 'openedAt', 'openedBy', 'closedAt', 'closedBy',
-          'exchangeRateAtClose', 'orderCount', 'totalUsd', 'totalBs',
+          'exchangeRateAtClose', 'orderCount', 'ordersCount',
+          'totalUsd', 'totalBs', 'totalSalesUsd', 'totalSalesBs',
           'totalsByMethod', 'notes', 'updatedAt'
         ]) &&
         hasRequiredFields(data, ['id', 'status', 'openedAt']) &&
@@ -541,13 +602,16 @@ service cloud.firestore {
         isNullableString(data, 'closedBy', 1, 128) &&
         (!('exchangeRateAtClose' in data) || data.exchangeRateAtClose == null || (data.exchangeRateAtClose is number && data.exchangeRateAtClose > 0 && data.exchangeRateAtClose <= 1000000)) &&
         isOptionalIntRange(data, 'orderCount', 0, 100000) &&
+        isOptionalIntRange(data, 'ordersCount', 0, 100000) &&
         isOptionalNumberRange(data, 'totalUsd', 0, 10000000) &&
         isOptionalNumberRange(data, 'totalBs', 0, 10000000000) &&
+        isOptionalNumberRange(data, 'totalSalesUsd', 0, 10000000) &&
+        isOptionalNumberRange(data, 'totalSalesBs', 0, 10000000000) &&
         (!('totalsByMethod' in data) || (
           data.totalsByMethod is map &&
           hasOnlyAllowedFields(data.totalsByMethod, ['zelle', 'efectivo_usd', 'debito_punto', 'efectivo_bs'])
         )) &&
-        isOptionalString(data, 'notes', 0, 500) &&
+        isNullableString(data, 'notes', 0, 500) &&
         isOptionalTimestampOrIso(data, 'updatedAt');
     }
 
@@ -565,21 +629,29 @@ service cloud.firestore {
     }
 
     function isValidPublicSettings(data) {
-      return hasOnlyAllowedFields(data, ['restaurantName', 'printer', 'updatedAt']) &&
+      return hasOnlyAllowedFields(data, [
+          'restaurantName', 'printer',
+          'exchangeRate', 'exchangeRateUpdatedAt', 'exchangeRateSource',
+          'updatedAt'
+        ]) &&
         hasRequiredFields(data, ['restaurantName', 'printer']) &&
         isValidString(data.restaurantName, 1, 100) &&
         isValidPrinterConfig(data.printer) &&
+        (!('exchangeRate' in data) || (data.exchangeRate is number && data.exchangeRate > 0 && data.exchangeRate <= 1000000)) &&
+        isOptionalTimestampOrIso(data, 'exchangeRateUpdatedAt') &&
+        isOptionalString(data, 'exchangeRateSource', 0, 100) &&
         isOptionalTimestampOrIso(data, 'updatedAt');
     }
 
     function isValidAdminSettings(data) {
       return hasOnlyAllowedFields(data, [
-          'restaurantName', 'exchangeRate', 'exchangeRateUpdatedAt',
+          'restaurantName', 'exchangeRate', 'exchangeRateUpdatedAt', 'exchangeRateSource',
           'printer', 'defaultCurrency', 'updatedAt', 'updatedBy'
         ]) &&
         isOptionalString(data, 'restaurantName', 1, 100) &&
         (!('exchangeRate' in data) || (data.exchangeRate is number && data.exchangeRate > 0 && data.exchangeRate <= 1000000)) &&
         isOptionalTimestampOrIso(data, 'exchangeRateUpdatedAt') &&
+        isOptionalString(data, 'exchangeRateSource', 0, 100) &&
         (!('printer' in data) || isValidPrinterConfig(data.printer)) &&
         (!('defaultCurrency' in data) || (data.defaultCurrency is string && data.defaultCurrency in ['USD', 'VES'])) &&
         isOptionalTimestampOrIso(data, 'updatedAt') &&
@@ -588,15 +660,20 @@ service cloud.firestore {
 
     function isValidPrintJob(data, jobId) {
       return hasOnlyAllowedFields(data, [
-          'id', 'type', 'status', 'comandaId', 'orderId', 'shiftId',
+          'id', 'type', 'status', 'referenceId', 'title', 'textPreview', 'error',
+          'comandaId', 'orderId', 'shiftId',
           'payloadText', 'copies', 'attempts', 'lastError',
           'printedByStation', 'createdBy', 'createdAt', 'updatedAt', 'printedAt'
         ]) &&
         hasRequiredFields(data, ['id', 'type', 'status', 'createdAt']) &&
         isValidString(data.id, 1, 128) &&
         data.id == jobId &&
-        data.type in ['comanda', 'anulacion', 'precuenta', 'cierre_caja', 'test'] &&
+        data.type in ['comanda', 'anulacion', 'precuenta', 'cierre', 'cierre_caja', 'prueba', 'test'] &&
         isValidPrintStatus(data.status) &&
+        isOptionalString(data, 'referenceId', 0, 128) &&
+        isOptionalString(data, 'title', 1, 200) &&
+        isOptionalString(data, 'textPreview', 1, 16384) &&
+        isNullableString(data, 'error', 0, 300) &&
         isNullableString(data, 'comandaId', 1, 128) &&
         isNullableString(data, 'orderId', 1, 128) &&
         isNullableString(data, 'shiftId', 1, 128) &&
@@ -638,7 +715,7 @@ service cloud.firestore {
     }
 
     // Cocina comanda updates:
-    // - Only status, printStatus, updatedAt, completedAt allowed.
+    // - Only status, printStatus, updatedAt, completedAt allowed (sequenceNumber immutable).
     // - Enforces forward KDS progression (void alerts may jump directly to 'lista').
     function isValidCocinaComandaUpdate() {
       let changed = request.resource.data.diff(resource.data).affectedKeys();
@@ -650,13 +727,14 @@ service cloud.firestore {
           next == prev ||
           (prev == 'pendiente' && next == 'en_preparacion') ||
           (prev == 'en_preparacion' && next == 'lista') ||
-          (prev == 'pendiente' && next == 'lista' && resource.data.isVoidAlert == true)
+          (prev == 'pendiente' && next == 'lista' &&
+           ('isVoidAlert' in resource.data) && resource.data.isVoidAlert == true)
         );
     }
 
     // Mesonero comanda updates:
     // - Strictly limited to LAN print fallback (`printStatus == 'printed_locally'`)
-    //   and clearing offline sync badge (`pendingSync == false`).
+    //   and clearing offline sync badge (`pendingSync == false`); sequenceNumber immutable.
     function isValidMesoneroComandaUpdate() {
       let changed = request.resource.data.diff(resource.data).affectedKeys();
 
@@ -669,7 +747,7 @@ service cloud.firestore {
     }
 
     // Mesonero order updates:
-    // - Only open orders with 0 payments; cannot close, add payments, remove/void items, or reduce totalUsd.
+    // - Only open orders with 0 payments; cannot close, add payments, set preFactura, remove/void items, or reduce totalUsd.
     function isValidMesoneroOrderUpdate() {
       let changed = request.resource.data.diff(resource.data).affectedKeys();
       let prevItems = resource.data.items;
@@ -679,10 +757,14 @@ service cloud.firestore {
         resource.data.payments.size() == 0 &&
         request.resource.data.status == 'abierta' &&
         request.resource.data.payments.size() == 0 &&
-        changed.hasOnly(['items', 'totalUsd', 'totalBs', 'updatedAt', 'pendingSync', 'waiterId', 'waiterName']) &&
+        changed.hasOnly([
+          'items', 'subtotalUsd', 'ivaRate', 'ivaUsd', 'ivaBs',
+          'totalUsd', 'totalBs', 'exchangeRate',
+          'updatedAt', 'pendingSync', 'waiterId', 'waiterName'
+        ]) &&
         areImmutableFieldsUnchanged([
           'id', 'locationId', 'locationLabel', 'zone', 'status', 'payments',
-          'exchangeRate', 'voidedCount', 'shiftId', 'closedAt', 'closedBy', 'createdAt'
+          'preFactura', 'voidedCount', 'shiftId', 'openedAt', 'closedAt', 'closedBy', 'createdAt'
         ]) &&
         // Append-only item protection: cannot shrink item list, drop totalUsd, or overwrite boundary items
         nextItems.size() >= prevItems.size() &&
@@ -699,9 +781,12 @@ service cloud.firestore {
     function isValidAdminOrderUpdate() {
       return areImmutableFieldsUnchanged(['id', 'locationId']) &&
         isUnchangedIfPresent('createdAt') &&
+        isUnchangedIfPresent('openedAt') &&
         (resource.data.status == 'abierta' || areImmutableFieldsUnchanged([
-          'status', 'items', 'payments', 'totalUsd', 'totalBs',
-          'exchangeRate', 'closedAt', 'closedBy', 'shiftId'
+          'status', 'items', 'payments',
+          'subtotalUsd', 'ivaRate', 'ivaUsd', 'ivaBs',
+          'totalUsd', 'totalBs', 'exchangeRate',
+          'openedAt', 'closedAt', 'closedBy', 'shiftId'
         ]));
     }
 
@@ -712,7 +797,9 @@ service cloud.firestore {
         isUnchangedIfPresent('openedBy') &&
         (resource.data.status == 'abierto' || areImmutableFieldsUnchanged([
           'status', 'closedAt', 'closedBy', 'exchangeRateAtClose',
-          'orderCount', 'totalUsd', 'totalBs', 'totalsByMethod'
+          'orderCount', 'ordersCount',
+          'totalUsd', 'totalBs', 'totalSalesUsd', 'totalSalesBs',
+          'totalsByMethod'
         ]));
     }
 
@@ -720,7 +807,7 @@ service cloud.firestore {
     // - Serialized print coordinator may only update execution state & error/retry metadata.
     function isValidCocinaPrintJobUpdate() {
       let changed = request.resource.data.diff(resource.data).affectedKeys();
-      return changed.hasOnly(['status', 'attempts', 'lastError', 'printedAt', 'updatedAt', 'printedByStation']);
+      return changed.hasOnly(['status', 'attempts', 'lastError', 'error', 'printedAt', 'updatedAt', 'printedByStation']);
     }
 
     // Mesonero printJob updates:
@@ -729,7 +816,7 @@ service cloud.firestore {
       let changed = request.resource.data.diff(resource.data).affectedKeys();
       return resource.data.type == 'comanda' &&
         resource.data.status in ['pending', 'failed'] &&
-        changed.hasOnly(['status', 'printedAt', 'updatedAt', 'printedByStation']) &&
+        changed.hasOnly(['status', 'error', 'printedAt', 'updatedAt', 'printedByStation']) &&
         request.resource.data.status == 'printed_locally';
     }
 
@@ -787,7 +874,7 @@ service cloud.firestore {
         isAdmin() ||
         (isMesonero() &&
          request.resource.data.status == 'pendiente' &&
-         request.resource.data.isVoidAlert == false &&
+         (!('isVoidAlert' in request.resource.data) || request.resource.data.isVoidAlert == false) &&
          (!('printStatus' in request.resource.data) || request.resource.data.printStatus in ['pending', 'printed_locally']))
       );
       allow update: if isValidComanda(request.resource.data, comandaId) && (
@@ -800,8 +887,8 @@ service cloud.firestore {
 
     // 5. /orders/{orderId}
     // Read: caja_admin (all) or mesonero (open orders ONLY; DENIED to cocina).
-    // Create/Update by mesonero: open orders with 0 payments only; no closing, payments, or voids.
-    // Caja/Admin: full CRUD (settling, payments, voids) with frozen closed-order history.
+    // Create/Update by mesonero: open orders with 0 payments only; no closing, payments, preFactura, or voids.
+    // Caja/Admin: full CRUD (settling, payments, voids, preFactura) with frozen closed-order history.
     match /orders/{orderId} {
       allow read: if isAdmin() || (isMesonero() && (resource == null || resource.data.status == 'abierta'));
       allow create: if isValidOrder(request.resource.data, orderId) && (
@@ -811,8 +898,8 @@ service cloud.firestore {
          request.resource.data.payments.size() == 0 &&
          (!('closedAt' in request.resource.data) || request.resource.data.closedAt == null) &&
          (!('closedBy' in request.resource.data) || request.resource.data.closedBy == null) &&
-         (!('shiftId' in request.resource.data) || request.resource.data.shiftId == null) &&
-         (!('voidedCount' in request.resource.data) || request.resource.data.voidedCount == 0))
+         (!('voidedCount' in request.resource.data) || request.resource.data.voidedCount == 0) &&
+         (!('preFactura' in request.resource.data) || request.resource.data.preFactura == null))
       );
       allow update: if isValidOrder(request.resource.data, orderId) && (
         (isAdmin() && isValidAdminOrderUpdate()) ||
@@ -838,7 +925,10 @@ service cloud.firestore {
       allow create: if isAdmin() && isValidInventoryMovement(request.resource.data, movementId);
       allow update: if isAdmin() &&
         isValidInventoryMovement(request.resource.data, movementId) &&
-        areImmutableFieldsUnchanged(['id', 'ingredientId', 'type', 'delta', 'comandaId', 'orderId', 'createdAt']);
+        areImmutableFieldsUnchanged([
+          'id', 'ingredientId', 'type', 'delta',
+          'comandaId', 'orderId', 'referenceId', 'createdAt'
+        ]);
       allow delete: if isAdmin();
     }
 
@@ -863,7 +953,7 @@ service cloud.firestore {
       allow delete: if isAdmin();
     }
 
-    // 6e. /settings/public — Read by all active stations (LAN printer IP/port & restaurant name ONLY)
+    // 6e. /settings/public — Read by all active stations (LAN printer IP/port, restaurant name & BCV rate)
     //     Write: caja_admin ONLY.
     match /settings/public {
       allow read: if isAnyActiveStation();
@@ -872,7 +962,7 @@ service cloud.firestore {
       allow delete: if isAdmin();
     }
 
-    // 6f. /settings/{docId} (all other settings docs, e.g. exchangeRate) — STRICTLY caja_admin ONLY
+    // 6f. /settings/{docId} (all other settings docs, e.g. settings/app) — STRICTLY caja_admin ONLY
     match /settings/{docId} {
       allow read: if docId != 'public' && isAdmin();
       allow create: if docId != 'public' && isAdmin() && isValidAdminSettings(request.resource.data);
@@ -881,7 +971,7 @@ service cloud.firestore {
     }
 
     // 7. /printJobs/{jobId}
-    // Read/Create: mesonero (comanda jobs only), cocina (comanda/anulacion/test), caja_admin (all).
+    // Read/Create: mesonero (comanda jobs only), cocina (comanda/anulacion/prueba/test), caja_admin (all).
     // Update: cocina (print state), caja_admin (full), mesonero (status == 'printed_locally' only).
     // Delete: caja_admin ONLY.
     match /printJobs/{jobId} {
@@ -889,7 +979,7 @@ service cloud.firestore {
       allow create: if isValidPrintJob(request.resource.data, jobId) && (
         isAdmin() ||
         (isCocina() &&
-         request.resource.data.type in ['comanda', 'anulacion', 'test'] &&
+         request.resource.data.type in ['comanda', 'anulacion', 'prueba', 'test'] &&
          request.resource.data.status in ['pending', 'printing']) ||
         (isMesonero() &&
          request.resource.data.type == 'comanda' &&

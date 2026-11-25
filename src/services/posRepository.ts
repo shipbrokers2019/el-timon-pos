@@ -168,8 +168,24 @@ export class LocalPosRepository implements PosRepository {
   constructor() {
     const savedState = readJsonStorage<PosState>(POS_STORAGE_KEY);
     if (savedState && Array.isArray(savedState.locations) && savedState.locations.length > 0) {
+      let needsPersist = false;
       if (savedState.settings?.printer?.restaurantName === 'Brisa Marina Beach Club') {
         savedState.settings.printer.restaurantName = 'El Timón Restaurante';
+        needsPersist = true;
+      }
+      const baselineLocations = createInitialPosState().locations;
+      const savedById = new Map(savedState.locations.map((loc) => [loc.id, loc]));
+      if (baselineLocations.some((loc) => !savedById.has(loc.id))) {
+        const mergedMap = new Map(baselineLocations.map((loc) => [loc.id, loc]));
+        for (const loc of savedState.locations) {
+          mergedMap.set(loc.id, loc);
+        }
+        savedState.locations = Array.from(mergedMap.values()).sort(
+          (a, b) => a.zone.localeCompare(b.zone) || a.number - b.number,
+        );
+        needsPersist = true;
+      }
+      if (needsPersist) {
         writeJsonStorage(POS_STORAGE_KEY, savedState);
       }
       this.state = savedState;
@@ -403,6 +419,7 @@ export class LocalPosRepository implements PosRepository {
       createdAt: nowIso,
       updatedAt: nowIso,
       pendingSync: Boolean(input.isOffline),
+      isVoidAlert: false,
     };
 
     const { ingredients: updatedIngredients, newMovements } =
