@@ -190,24 +190,37 @@ export class FirebasePosRepository implements PosRepository {
         }
       }
 
-      // Heal orphaned occupied locations if the orders collection is completely empty
-      if (existingOrders.empty) {
-        for (const locDoc of existingLocations.docs) {
-          const data = locDoc.data() as Partial<Location>;
-          if (data.status && data.status !== 'libre') {
-            batch.set(
-              doc(this.db, 'locations', locDoc.id),
-              {
-                status: 'libre',
-                activeOrderId: null,
-                kitchenReadyAlert: false,
-                pendingSync: false,
-                preFacturaReady: false,
-              },
-              { merge: true },
-            );
-            hasWrites = true;
-          }
+      // Heal any orphaned occupied location that has no matching open order in Firestore
+      const openOrders = existingOrders.docs
+        .map((d) => d.data() as Partial<Order>)
+        .filter((o) => o.status === 'abierta');
+      const openOrderIds = new Set(
+        openOrders.map((o) => o.id).filter((id): id is string => Boolean(id)),
+      );
+      const openOrderLocationIds = new Set(
+        openOrders
+          .map((o) => o.locationId)
+          .filter((id): id is string => Boolean(id)),
+      );
+
+      for (const locDoc of existingLocations.docs) {
+        const data = locDoc.data() as Partial<Location>;
+        const hasOpenOrder =
+          openOrderLocationIds.has(locDoc.id) ||
+          (typeof data.activeOrderId === 'string' && openOrderIds.has(data.activeOrderId));
+        if (data.status && data.status !== 'libre' && !hasOpenOrder) {
+          batch.set(
+            doc(this.db, 'locations', locDoc.id),
+            {
+              status: 'libre',
+              activeOrderId: null,
+              kitchenReadyAlert: false,
+              pendingSync: false,
+              preFacturaReady: false,
+            },
+            { merge: true },
+          );
+          hasWrites = true;
         }
       }
 

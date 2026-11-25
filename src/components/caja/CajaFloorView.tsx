@@ -5,19 +5,39 @@ import {
   CheckCircle2,
   Clock,
   CreditCard,
+  Minus,
   Plus,
   Printer,
+  Send,
+  Trash2,
   Umbrella,
   UtensilsCrossed,
   X,
 } from 'lucide-react';
 import { calculateOrderBreakdown, calculateOrderTotalUsd, usdToBs } from '../../domain/currency';
 import { usePos } from '../../store/PosProvider';
-import type { Location, Order, VoidDisposition } from '../../types/pos';
+import type { Location, MenuCategory, MenuItem, Order, VoidDisposition } from '../../types/pos';
 import { getElapsedMinutes } from '../timeUtils';
 import { CheckoutModal } from './CheckoutModal';
 
 type ZoneFilter = 'todas' | 'mesas' | 'toldos' | 'por_cobrar';
+
+const CATEGORY_TABS: ReadonlyArray<'Todos' | MenuCategory> = [
+  'Todos',
+  'Platos',
+  'Entradas',
+  'Bebidas',
+  'Cócteles',
+  'Extras',
+];
+
+interface DraftCartLine {
+  menuItemId: string;
+  name: string;
+  priceUsd: number;
+  quantity: number;
+  notes: string;
+}
 
 const STATUS_BADGE: Record<Location['status'], { label: string; className: string }> = {
   libre: {
@@ -48,11 +68,11 @@ export function CajaFloorView() {
   const [checkoutOrder, setCheckoutOrder] = useState<Order | null>(null);
   const [nowMs, setNowMs] = useState<number>(() => Date.now());
 
-  // Inline add-item form state
+  // Visual category menu + multi-item cart state
   const [showAddItem, setShowAddItem] = useState(false);
-  const [addMenuItemId, setAddMenuItemId] = useState<string>('');
-  const [addQty, setAddQty] = useState<number>(1);
-  const [addNotes, setAddNotes] = useState<string>('');
+  const [activeCategory, setActiveCategory] = useState<'Todos' | MenuCategory>('Todos');
+  const [draftCart, setDraftCart] = useState<DraftCartLine[]>([]);
+  const [submittingCart, setSubmittingCart] = useState(false);
 
   // Inline void form state
   const [voidingItemId, setVoidingItemId] = useState<string | null>(null);
@@ -117,43 +137,104 @@ export function CajaFloorView() {
     return openOrderByLocationId.get(selectedLocation.id) ?? null;
   }, [openOrderByLocationId, selectedLocation]);
 
-  const availableMenu = useMemo(
-    () => state.menu.filter((item) => !item.outOfStock),
-    [state.menu],
+  const filteredMenu = useMemo(
+    () =>
+      activeCategory === 'Todos'
+        ? state.menu
+        : state.menu.filter((item) => item.category === activeCategory),
+    [activeCategory, state.menu],
+  );
+
+  const draftCartTotalUsd = useMemo(
+    () => draftCart.reduce((sum, line) => sum + line.priceUsd * line.quantity, 0),
+    [draftCart],
   );
 
   const handleSelectLocation = (locationId: string) => {
+    const hasOpenOrder = openOrderByLocationId.has(locationId);
     setSelectedLocationId(locationId);
-    setShowAddItem(false);
+    // Open visual menu automatically for free tables; collapsed by default when inspecting an active account
+    setShowAddItem(!hasOpenOrder);
+    setActiveCategory('Todos');
+    setDraftCart([]);
     setVoidingItemId(null);
     setVoidReason('');
     setActionError(null);
     setActionFeedback(null);
   };
 
-  const handleAddItemSubmit = async () => {
-    if (!selectedLocation || !currentUser) {
-      return;
-    }
-    const targetId = addMenuItemId || availableMenu[0]?.id;
-    if (!targetId) {
-      setActionError('No hay productos disponibles para agregar.');
+  const handleAddProductToDraft = (item: MenuItem) => {
+    if (item.outOfStock) {
       return;
     }
     setActionError(null);
+    setActionFeedback(null);
+    setDraftCart((prev) => {
+      const existing = prev.find((line) => line.menuItemId === item.id);
+      if (existing) {
+        return prev.map((line) =>
+          line.menuItemId === item.id ? { ...line, quantity: line.quantity + 1 } : line,
+        );
+      }
+      return [
+        ...prev,
+        {
+          menuItemId: item.id,
+          name: item.name,
+          priceUsd: item.priceUsd,
+          quantity: 1,
+          notes: '',
+        },
+      ];
+    });
+  };
+
+  const handleAdjustDraftQty = (menuItemId: string, delta: number) => {
+    setDraftCart((prev) =>
+      prev
+        .map((line) =>
+          line.menuItemId === menuItemId
+            ? { ...line, quantity: line.quantity + delta }
+            : line,
+        )
+        .filter((line) => line.quantity > 0),
+    );
+  };
+
+  const handleDraftNoteChange = (menuItemId: string, notes: string) => {
+    setDraftCart((prev) =>
+      prev.map((line) => (line.menuItemId === menuItemId ? { ...line, notes } : line)),
+    );
+  };
+
+  const handleRemoveDraftLine = (menuItemId: string) => {
+    setDraftCart((prev) => prev.filter((line) => line.menuItemId !== menuItemId));
+  };
+
+  const handleAddItemSubmit = async () => {
+    if (!selectedLocation || !currentUser || draftCart.length === 0) {
+      return;
+    }
+    setActionError(null);
+    setSubmittingCart(true);
     try {
       await submitComanda({
         locationId: selectedLocation.id,
         waiterId: currentUser.id,
         waiterName: currentUser.name,
-        items: [{ menuItemId: targetId, quantity: Math.max(1, addQty), notes: addNotes }],
+        items: draftCart.map((line) => ({
+          menuItemId: line.menuItemId,
+          quantity: line.quantity,
+          notes: line.notes.trim(),
+        })),
       });
-      setAddQty(1);
-      setAddNotes('');
+      setDraftCart([]);
       setShowAddItem(false);
-      setActionFeedback('Ítem agregado a la cuenta.');
+      setActionFeedback('Productos agregados a la cuenta.');
     } catch (err) {
-      setActionError(err instanceof Error ? err.message : 'No se pudo agregar el ítem.');
+      setActionError(err instanceof Error ? err.message : 'No se pudieron agregar los productos.');
+    } finally {
+      setSubmittingCart(false);
     }
   };
 
@@ -482,85 +563,174 @@ export function CajaFloorView() {
                 </p>
               )}
 
-              {/* Quick Add Item */}
+              {/* Quick Add Products (Category cards matching Mesonero UX) */}
               <div className="pt-2 border-t border-[#E5DFD3]">
                 <button
                   type="button"
-                  onClick={() => {
-                    setShowAddItem((prev) => !prev);
-                    if (!addMenuItemId && availableMenu[0]) {
-                      setAddMenuItemId(availableMenu[0].id);
-                    }
-                  }}
+                  onClick={() => setShowAddItem((prev) => !prev)}
                   className="min-h-12 px-3.5 rounded-xl border border-[#0E7490]/35 bg-[#0E7490]/8 hover:bg-[#0E7490]/15 text-xs sm:text-sm font-bold text-[#0E7490] inline-flex items-center gap-1.5 cursor-pointer"
                 >
                   <Plus className="h-4 w-4" aria-hidden="true" />
-                  <span>{showAddItem ? 'Ocultar formulario' : 'Agregar ítem a la cuenta'}</span>
+                  <span>{showAddItem ? 'Ocultar menú de productos' : 'Agregar productos'}</span>
                 </button>
 
                 {showAddItem && (
                   <div className="mt-3 p-3.5 rounded-xl bg-[#FAF8F4] border border-[#E5DFD3] space-y-3">
-                    <div>
-                      <label
-                        htmlFor="caja-add-item-select"
-                        className="block text-xs font-bold text-[#0F2A36] mb-1"
-                      >
-                        Producto
-                      </label>
-                      <select
-                        id="caja-add-item-select"
-                        value={addMenuItemId || availableMenu[0]?.id || ''}
-                        onChange={(e) => setAddMenuItemId(e.target.value)}
-                        className="w-full min-h-12 px-3 rounded-xl border border-[#E5DFD3] bg-white text-sm font-semibold text-[#0F2A36]"
-                      >
-                        {availableMenu.map((item) => (
-                          <option key={item.id} value={item.id}>
-                            {item.name} — ${item.priceUsd.toFixed(2)}
-                          </option>
-                        ))}
-                      </select>
-                    </div>
-                    <div className="grid grid-cols-3 gap-2">
-                      <div>
-                        <label
-                          htmlFor="caja-add-qty"
-                          className="block text-xs font-bold text-[#0F2A36] mb-1"
-                        >
-                          Cant.
-                        </label>
-                        <input
-                          id="caja-add-qty"
-                          type="number"
-                          min={1}
-                          value={addQty}
-                          onChange={(e) => setAddQty(Math.max(1, Number(e.target.value) || 1))}
-                          className="w-full min-h-12 px-3 rounded-xl border border-[#E5DFD3] bg-white text-sm font-bold tabular-nums"
-                        />
-                      </div>
-                      <div className="col-span-2">
-                        <label
-                          htmlFor="caja-add-notes"
-                          className="block text-xs font-bold text-[#0F2A36] mb-1"
-                        >
-                          Nota (opcional)
-                        </label>
-                        <input
-                          id="caja-add-notes"
-                          type="text"
-                          value={addNotes}
-                          onChange={(e) => setAddNotes(e.target.value)}
-                          placeholder="Ej. Sin sal"
-                          className="w-full min-h-12 px-3 rounded-xl border border-[#E5DFD3] bg-white text-sm"
-                        />
-                      </div>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={() => void handleAddItemSubmit()}
-                      className="w-full min-h-12 px-4 rounded-xl bg-[#0E7490] hover:bg-[#0B5E75] text-white text-sm font-bold cursor-pointer"
+                    {/* Category tabs */}
+                    <div
+                      className="flex flex-wrap gap-1.5"
+                      role="tablist"
+                      aria-label="Categorías del menú en Caja"
                     >
-                      Confirmar producto
-                    </button>
+                      {CATEGORY_TABS.map((category) => {
+                        const active = activeCategory === category;
+                        return (
+                          <button
+                            key={category}
+                            type="button"
+                            role="tab"
+                            aria-selected={active}
+                            onClick={() => setActiveCategory(category)}
+                            className={`min-h-10 px-3 rounded-xl border text-xs font-bold transition-colors cursor-pointer ${
+                              active
+                                ? 'bg-[#0E7490] border-[#0E7490] text-white'
+                                : 'bg-white border-[#E5DFD3] text-[#0F2A36] hover:bg-[#F2EDE4]'
+                            }`}
+                          >
+                            {category}
+                          </button>
+                        );
+                      })}
+                    </div>
+
+                    {/* Visual product cards */}
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 max-h-64 overflow-y-auto pr-0.5">
+                      {filteredMenu.map((item) => {
+                        const isOut = item.outOfStock;
+                        const bsPrice = usdToBs(item.priceUsd, rate);
+                        return (
+                          <button
+                            key={item.id}
+                            type="button"
+                            disabled={isOut}
+                            onClick={() => handleAddProductToDraft(item)}
+                            className={`min-h-14 p-2.5 rounded-xl border text-left flex items-center justify-between gap-2 transition-colors ${
+                              isOut
+                                ? 'bg-[#E7E0D4]/70 border-[#0F2A36]/10 text-[#0F2A36]/45 cursor-not-allowed'
+                                : 'bg-white hover:bg-[#0E7490]/5 active:bg-[#0E7490]/10 border-[#E5DFD3] text-[#0F2A36] cursor-pointer'
+                            }`}
+                          >
+                            <div className="min-w-0">
+                              <p className="text-xs font-bold leading-snug truncate">
+                                {item.name}
+                              </p>
+                              <div className="mt-0.5 flex flex-wrap items-baseline gap-x-1.5">
+                                <span className="text-xs font-extrabold text-[#0E7490] tabular-nums">
+                                  ${item.priceUsd.toFixed(2)}
+                                </span>
+                                <span className="text-[11px] font-semibold text-[#0F2A36]/65 tabular-nums">
+                                  Bs {bsPrice.toFixed(2)}
+                                </span>
+                              </div>
+                            </div>
+
+                            {isOut ? (
+                              <span className="shrink-0 px-2 py-0.5 rounded-full bg-[#B91C1C]/12 border border-[#B91C1C]/30 text-[10px] font-bold text-[#B91C1C]">
+                                Agotado
+                              </span>
+                            ) : (
+                              <span
+                                aria-hidden="true"
+                                className="shrink-0 h-8 w-8 rounded-lg bg-[#0E7490]/10 text-[#0E7490] flex items-center justify-center"
+                              >
+                                <Plus className="h-4 w-4" />
+                              </span>
+                            )}
+                          </button>
+                        );
+                      })}
+                    </div>
+
+                    {/* Draft cart */}
+                    {draftCart.length > 0 && (
+                      <div className="pt-2.5 border-t border-[#E5DFD3] space-y-2">
+                        <div className="flex items-center justify-between text-xs font-bold text-[#0F2A36]">
+                          <span>Por agregar ({draftCart.reduce((s, l) => s + l.quantity, 0)})</span>
+                          <span className="text-[#0E7490] tabular-nums">
+                            ${draftCartTotalUsd.toFixed(2)}
+                          </span>
+                        </div>
+
+                        <ul className="space-y-2">
+                          {draftCart.map((line) => (
+                            <li
+                              key={line.menuItemId}
+                              className="p-2.5 rounded-xl bg-white border border-[#E5DFD3] space-y-2"
+                            >
+                              <div className="flex items-center justify-between gap-2">
+                                <span className="text-xs font-bold text-[#0F2A36] truncate">
+                                  {line.name}
+                                </span>
+                                <div className="flex items-center gap-1 shrink-0">
+                                  <button
+                                    type="button"
+                                    aria-label={`Disminuir ${line.name}`}
+                                    onClick={() => handleAdjustDraftQty(line.menuItemId, -1)}
+                                    className="h-8 w-8 rounded-lg border border-[#E5DFD3] bg-[#FAF8F4] hover:bg-white flex items-center justify-center text-[#0F2A36] cursor-pointer"
+                                  >
+                                    <Minus className="h-3.5 w-3.5" aria-hidden="true" />
+                                  </button>
+                                  <span className="min-w-6 text-center text-xs font-extrabold tabular-nums">
+                                    {line.quantity}
+                                  </span>
+                                  <button
+                                    type="button"
+                                    aria-label={`Aumentar ${line.name}`}
+                                    onClick={() => handleAdjustDraftQty(line.menuItemId, 1)}
+                                    className="h-8 w-8 rounded-lg border border-[#E5DFD3] bg-[#FAF8F4] hover:bg-white flex items-center justify-center text-[#0F2A36] cursor-pointer"
+                                  >
+                                    <Plus className="h-3.5 w-3.5" aria-hidden="true" />
+                                  </button>
+                                  <button
+                                    type="button"
+                                    aria-label={`Quitar ${line.name}`}
+                                    onClick={() => handleRemoveDraftLine(line.menuItemId)}
+                                    className="h-8 w-8 rounded-lg border border-[#B91C1C]/25 bg-red-50 hover:bg-red-100 flex items-center justify-center text-[#B91C1C] cursor-pointer"
+                                  >
+                                    <Trash2 className="h-3.5 w-3.5" aria-hidden="true" />
+                                  </button>
+                                </div>
+                              </div>
+
+                              <input
+                                type="text"
+                                value={line.notes}
+                                onChange={(e) =>
+                                  handleDraftNoteChange(line.menuItemId, e.target.value)
+                                }
+                                placeholder="Nota cocina (ej. Sin cebolla, bien cocida)"
+                                aria-label={`Nota para ${line.name}`}
+                                className="w-full min-h-9 px-2.5 rounded-lg border border-[#E5DFD3] bg-[#FAF8F4] text-xs text-[#0F2A36]"
+                              />
+                            </li>
+                          ))}
+                        </ul>
+
+                        <button
+                          type="button"
+                          disabled={submittingCart}
+                          onClick={() => void handleAddItemSubmit()}
+                          className="w-full min-h-12 px-4 rounded-xl bg-[#0E7490] hover:bg-[#0B5E75] disabled:opacity-50 text-white text-sm font-bold inline-flex items-center justify-center gap-2 cursor-pointer"
+                        >
+                          <Send className="h-4 w-4" aria-hidden="true" />
+                          <span>
+                            {submittingCart
+                              ? 'Agregando...'
+                              : `Agregar a la cuenta ($${draftCartTotalUsd.toFixed(2)})`}
+                          </span>
+                        </button>
+                      </div>
+                    )}
                   </div>
                 )}
               </div>

@@ -311,4 +311,32 @@ describe('Caja / Admin Complete Suite & App Wiring', () => {
       ).toBe(5);
     });
   });
+
+  it('7. Caja can add products directly using visual category tabs and touch product cards', async () => {
+    const user = userEvent.setup({ delay: null });
+    const repo = new LocalPosRepository();
+
+    renderApp(repo);
+    await enterPin(user, '0000');
+
+    // Click free Mesa 2 — visual menu opens immediately
+    await user.click(await screen.findByRole('button', { name: /^Mesa 2\b/i }));
+
+    const menuTabs = await screen.findByRole('tablist', {
+      name: /Categorías del menú en Caja/i,
+    });
+    await user.click(within(menuTabs).getByRole('tab', { name: 'Platos' }));
+    await user.click(screen.getByRole('button', { name: /Hamburguesa Playera/i }));
+
+    await user.click(within(menuTabs).getByRole('tab', { name: 'Bebidas' }));
+    await user.click(screen.getByRole('button', { name: /Cerveza Polar Pilsen/i }));
+
+    await user.click(screen.getByRole('button', { name: /Agregar a la cuenta/i }));
+
+    await waitFor(() => {
+      expect(screen.getByText(/Consumo detallado \(2\)/i)).toBeInTheDocument();
+    });
+    expect(screen.getByText(/Hamburguesa Playera/i)).toBeInTheDocument();
+    expect(screen.getByText(/Cerveza Polar Pilsen/i)).toBeInTheDocument();
+  });
 });
