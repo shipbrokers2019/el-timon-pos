@@ -93,8 +93,11 @@ describe('Role Isolation & Core Tablet Flows (Mesonero & Cocina)', () => {
     const pescadoBtn = await screen.findByRole('button', { name: /Pescado Frito Completo/i });
     expect(pescadoBtn).toBeDisabled();
     expect(within(pescadoBtn).getByText(/Agotado/i)).toBeInTheDocument();
+    expect(within(pescadoBtn).getByText('$14.00')).toBeInTheDocument();
 
-    await user.click(screen.getByRole('button', { name: /Hamburguesa Playera/i }));
+    const hamburguesaBtn = screen.getByRole('button', { name: /Hamburguesa Playera/i });
+    expect(within(hamburguesaBtn).getByText('$8.50')).toBeInTheDocument();
+    await user.click(hamburguesaBtn);
 
     const noteInput = screen.getByLabelText(/Nota para Hamburguesa Playera/i);
     await user.type(noteInput, 'Sin cebolla');

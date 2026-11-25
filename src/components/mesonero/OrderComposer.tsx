@@ -266,7 +266,7 @@ export function OrderComposer({ location, onClose }: OrderComposerProps) {
           })}
         </div>
 
-        {/* Menu item grid (no prices, no numeric stock) */}
+        {/* Menu item grid (menu prices visible for offering; no caja totals or numeric stock) */}
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
           {filteredMenu.map((item) => (
             <button
@@ -282,7 +282,16 @@ export function OrderComposer({ location, onClose }: OrderComposerProps) {
             >
               <div className="min-w-0">
                 <p className="text-sm font-bold leading-snug truncate">{item.name}</p>
-                <p className="text-xs font-medium text-[#0F2A36]/65">{item.category}</p>
+                <div className="flex items-center gap-2 mt-0.5">
+                  <span
+                    className={`text-xs font-extrabold tabular-nums ${
+                      item.outOfStock ? 'text-[#0F2A36]/45' : 'text-[#0E7490]'
+                    }`}
+                  >
+                    ${item.priceUsd.toFixed(2)}
+                  </span>
+                  <span className="text-xs font-medium text-[#0F2A36]/60">{item.category}</span>
+                </div>
               </div>
               {item.outOfStock ? (
                 <span className="shrink-0 px-2 py-0.5 rounded-full bg-[#B91C1C] text-white text-[11px] font-bold">
