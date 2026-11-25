@@ -13,6 +13,7 @@ export interface Location {
   activeOrderId: string | null;
   pendingSync?: boolean;
   kitchenReadyAlert?: boolean;
+  preFacturaReady?: boolean;
 }
 
 export type Unit = 'g' | 'kg' | 'ml' | 'L' | 'unidad';
@@ -103,6 +104,25 @@ export interface PaymentEntry {
   paidAt: string;
 }
 
+export interface PreFacturaSnapshot {
+  id: string;
+  orderId: string;
+  locationId: string;
+  locationLabel: string;
+  restaurantName: string;
+  items: Array<{
+    id: string;
+    name: string;
+    quantity: number;
+    unitPriceUsd: number;
+    subtotalUsd: number;
+  }>;
+  totalUsd: number;
+  totalBs: number;
+  exchangeRate: number;
+  generatedAt: string;
+}
+
 export interface Order {
   id: string;
   locationId: string;
@@ -119,6 +139,7 @@ export interface Order {
   payments: PaymentEntry[];
   openedAt: string;
   closedAt?: string;
+  preFactura?: PreFacturaSnapshot | null;
 }
 
 export type InventoryMovementType =

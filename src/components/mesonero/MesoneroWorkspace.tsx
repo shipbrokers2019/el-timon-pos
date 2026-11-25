@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { BellRing, Clock, Umbrella, UtensilsCrossed, WifiOff } from 'lucide-react';
+import { BellRing, Clock, ReceiptText, Umbrella, UtensilsCrossed, WifiOff } from 'lucide-react';
 import { usePos } from '../../store/PosProvider';
 import type { Location, Zone } from '../../types/pos';
 import { getElapsedMinutes } from '../timeUtils';
@@ -165,6 +165,13 @@ export function MesoneroWorkspace() {
                         <div className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-[#047857] text-white text-[11px] font-bold">
                           <BellRing className="h-3 w-3" aria-hidden="true" />
                           <span>Listo en cocina</span>
+                        </div>
+                      )}
+
+                      {loc.preFacturaReady && (
+                        <div className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-[#0E7490] text-white text-[11px] font-bold">
+                          <ReceiptText className="h-3 w-3" aria-hidden="true" />
+                          <span>Pre-factura lista</span>
                         </div>
                       )}
 

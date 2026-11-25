@@ -702,9 +702,21 @@ export class FirebasePosRepository implements PosRepository {
 
   async createPreCuentaPrintJob(orderId: string): Promise<PrintJob> {
     const job = await this.local.createPreCuentaPrintJob(orderId);
-    this.commitNonBlocking(
-      setDoc(doc(this.db, 'printJobs', job.id), job, { merge: true }),
-    );
+    const state = this.local.getState();
+    const order = state.orders.find((o) => o.id === orderId);
+    const location = order
+      ? state.locations.find((l) => l.id === order.locationId)
+      : undefined;
+
+    const batch = writeBatch(this.db);
+    batch.set(doc(this.db, 'printJobs', job.id), job, { merge: true });
+    if (order) {
+      batch.set(doc(this.db, 'orders', order.id), order, { merge: true });
+    }
+    if (location) {
+      batch.set(doc(this.db, 'locations', location.id), location, { merge: true });
+    }
+    this.commitNonBlocking(batch.commit());
     return job;
   }
 

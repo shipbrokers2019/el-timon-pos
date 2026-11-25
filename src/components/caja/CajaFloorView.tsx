@@ -189,6 +189,9 @@ export function CajaFloorView() {
     setActionError(null);
     try {
       await createPreCuentaPrintJob(selectedOrder.id);
+      setActionFeedback(
+        'Pre-factura generada y enviada a la tablet del mesonero para mostrar al cliente.',
+      );
     } catch (err) {
       setActionError(
         err instanceof Error ? err.message : 'No se pudo generar la pre-cuenta.',

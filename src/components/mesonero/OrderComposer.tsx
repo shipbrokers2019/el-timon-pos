@@ -12,6 +12,7 @@ import {
 } from 'lucide-react';
 import { usePos } from '../../store/PosProvider';
 import { usdToBs } from '../../domain/currency';
+import { CustomerPreFacturaModal } from './CustomerPreFacturaModal';
 import type { ComandaStatus, Location, MenuCategory, OrderItem } from '../../types/pos';
 
 interface OrderComposerProps {
@@ -62,6 +63,7 @@ export function OrderComposer({ location, onClose }: OrderComposerProps) {
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [feedbackMessage, setFeedbackMessage] = useState<string | null>(null);
+  const [showingPreFactura, setShowingPreFactura] = useState(false);
 
   const activeOrder = useMemo(
     () =>
@@ -227,6 +229,23 @@ export function OrderComposer({ location, onClose }: OrderComposerProps) {
               className="min-h-12 px-3 rounded-lg bg-white text-[#047857] text-xs font-bold cursor-pointer"
             >
               Confirmar entrega
+            </button>
+          </div>
+        )}
+
+        {/* Pre-factura sent by Caja to show to the customer */}
+        {activeOrder?.preFactura && (
+          <div className="p-3 rounded-xl bg-[#0E7490] text-white flex items-center justify-between gap-3">
+            <div className="flex items-center gap-2 text-sm font-bold">
+              <ReceiptText className="h-4 w-4 shrink-0" aria-hidden="true" />
+              <span>Pre-factura enviada por Caja</span>
+            </div>
+            <button
+              type="button"
+              onClick={() => setShowingPreFactura(true)}
+              className="min-h-12 px-3.5 rounded-lg bg-white text-[#0E7490] text-xs font-extrabold cursor-pointer shrink-0"
+            >
+              Mostrar al cliente
             </button>
           </div>
         )}
@@ -460,6 +479,13 @@ export function OrderComposer({ location, onClose }: OrderComposerProps) {
           </section>
         )}
       </div>
+
+      {showingPreFactura && activeOrder?.preFactura && (
+        <CustomerPreFacturaModal
+          preFactura={activeOrder.preFactura}
+          onClose={() => setShowingPreFactura(false)}
+        />
+      )}
     </aside>
   );
 }

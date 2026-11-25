@@ -20,6 +20,7 @@ import type {
   OrderItem,
   PaymentEntry,
   PosState,
+  PreFacturaSnapshot,
   PrintJob,
   PrintStatus,
   PrinterConfig,
@@ -764,6 +765,7 @@ export class LocalPosRepository implements PosRepository {
             activeOrderId: null,
             kitchenReadyAlert: false,
             pendingSync: false,
+            preFacturaReady: false,
           }
         : loc,
     );
@@ -1041,6 +1043,30 @@ export class LocalPosRepository implements PosRepository {
       order.status === 'cerrada'
         ? order.exchangeRate
         : this.state.settings.exchangeRate;
+    const totalUsd = calculateOrderTotalUsd(order.items);
+    const totalBs = usdToBs(totalUsd, rate);
+    const activeItems = order.items
+      .filter((item) => !item.voided)
+      .map((item) => ({
+        id: item.id,
+        name: item.name,
+        quantity: item.quantity,
+        unitPriceUsd: item.unitPriceUsd,
+        subtotalUsd: roundMoney(item.quantity * item.unitPriceUsd),
+      }));
+
+    const preFactura: PreFacturaSnapshot = {
+      id: createId('pref'),
+      orderId: order.id,
+      locationId: order.locationId,
+      locationLabel: order.locationLabel,
+      restaurantName: this.state.settings.printer.restaurantName,
+      items: activeItems,
+      totalUsd,
+      totalBs,
+      exchangeRate: rate,
+      generatedAt: nowIso,
+    };
 
     const printJob = buildPrintJobRecord({
       type: 'precuenta',
@@ -1056,8 +1082,19 @@ export class LocalPosRepository implements PosRepository {
       createdAt: nowIso,
     });
 
+    const updatedOrders = this.state.orders.map((o) =>
+      o.id === order.id ? { ...o, preFactura } : o,
+    );
+    const updatedLocations = this.state.locations.map((loc) =>
+      loc.id === order.locationId && order.status === 'abierta'
+        ? { ...loc, preFacturaReady: true }
+        : loc,
+    );
+
     this.commit({
       ...this.state,
+      orders: updatedOrders,
+      locations: updatedLocations,
       printJobs: [...this.state.printJobs, printJob],
     });
 
