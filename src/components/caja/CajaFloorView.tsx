@@ -320,6 +320,15 @@ export function CajaFloorView() {
         </p>
       </div>
 
+      {!selectedLocation && actionFeedback && (
+        <p
+          role="status"
+          className="p-3.5 rounded-xl bg-[#047857]/10 border border-[#047857]/30 text-sm font-semibold text-[#047857]"
+        >
+          {actionFeedback}
+        </p>
+      )}
+
       {/* Floor Grid + Account Detail Split */}
       <div
         className={`grid gap-5 items-start ${

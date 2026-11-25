@@ -120,6 +120,11 @@ export function SettingsView() {
     }
     try {
       await saveMenuItem({ ...item, priceUsd: parsed });
+      setPriceDrafts((prev) => {
+        const next = { ...prev };
+        delete next[item.id];
+        return next;
+      });
       setFeedbackMessage(`Precio de "${item.name}" actualizado a $${parsed.toFixed(2)}.`);
     } catch (err) {
       setErrorMessage(err instanceof Error ? err.message : 'No se pudo actualizar el producto.');
@@ -181,6 +186,10 @@ export function SettingsView() {
       setErrorMessage('El PIN debe tener exactamente 4 dígitos numéricos.');
       return;
     }
+    if (state.users.some((u) => u.pin === pin)) {
+      setErrorMessage('Ese PIN ya está asignado a otro usuario.');
+      return;
+    }
     try {
       await saveUser({ name, role: newUserRole, pin, active: true });
       setNewUserName('');
@@ -229,6 +238,7 @@ export function SettingsView() {
     setErrorMessage(null);
     try {
       await resetDemoData();
+      setPriceDrafts({});
       setConfirmingReset(false);
       setFeedbackMessage('Datos de demostración restablecidos correctamente.');
     } catch (err) {

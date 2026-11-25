@@ -1,0 +1,913 @@
+rules_version = '2';
+
+// ===============================================================
+// Beach Restaurant POS — Cloud Firestore Security Rules
+// ===============================================================
+//
+// Strict 3-station RBAC model:
+//   - 'mesonero'   : 10 mesas + 18 toldos grid, open orders, send comandas, LAN print fallback
+//   - 'cocina'     : KDS incoming comandas queue & serialized 80mm Wi-Fi print coordinator
+//   - 'caja_admin' : Full POS administration (billing, cash close, recipe inventory, analytics,
+//                    staff PINs, exchange rate, menu, printer config, station provisioning)
+//
+// Authority Source (trusted only — never client-supplied document data):
+//   1. Primary : Firebase Auth custom claim `request.auth.token.role`
+//                (revoked immediately if `/stationAuth/{uid}` exists with `active != true`)
+//   2. Fallback: Admin-provisioned `/stationAuth/{request.auth.uid}` with `active == true`
+//                and `role in ['mesonero', 'cocina', 'caja_admin']`
+//
+// ===============================================================
+// Assumed Data Model
+// ===============================================================
+//
+// Collection: /stationAuth/{uid}
+// Document ID: Firebase Auth UID of the provisioned tablet
+// Fields:
+//   - uid: string (required, == {uid}, 1..128 chars, immutable)
+//   - role: string (required, enum: 'mesonero' | 'cocina' | 'caja_admin')
+//   - active: bool (required) - immediate kill switch for stolen/deactivated tablets
+//   - label: string (optional, 1..80 chars) - e.g. "Tablet Playa 1"
+//   - deviceName: string (optional, 1..80 chars)
+//   - createdAt: timestamp | ISO-8601 string (optional, immutable once set)
+//   - updatedAt: timestamp | ISO-8601 string (optional)
+//
+// Collection: /locations/{locationId}
+// Document ID: locationId (e.g. 'mesa-1'..'mesa-10', 'toldo-1'..'toldo-18')
+// Fields:
+//   - id: string (required, == {locationId}, 1..64 chars, immutable)
+//   - zone: string (required, enum: 'mesas' | 'toldos', immutable for mesonero)
+//   - number: int (required, 1..100, immutable for mesonero)
+//   - label: string (required, 1..40 chars, immutable for mesonero)
+//   - status: string (required, enum: 'libre' | 'ocupada' | 'por_cobrar')
+//   - activeOrderId: string | null (optional, 1..128 chars if string)
+//   - pendingSync: bool (optional)
+//   - kitchenReadyAlert: bool (optional)
+//   - updatedAt: timestamp | ISO-8601 string (optional)
+//
+// Collection: /menu/{menuItemId}
+// Document ID: menuItemId
+// Fields:
+//   - id: string (required, == {menuItemId}, 1..64 chars, immutable)
+//   - name: string (required, 1..100 chars)
+//   - category: string (required, 1..50 chars)
+//   - priceUsd: number (required, 0..10000)
+//   - sendsToKitchen: bool (required)
+//   - outOfStock: bool (required) - shown as 'Agotado' to mesoneros (never numeric stock)
+//   - active: bool (optional)
+//   - description: string (optional, 0..300 chars)
+//   - recipe: list of maps (optional, 0..30 entries) - 1-level ingredient lines
+//   - createdAt: timestamp | ISO-8601 string (optional, immutable once set)
+//   - updatedAt: timestamp | ISO-8601 string (optional)
+//
+// Collection: /comandas/{comandaId}
+// Document ID: comandaId (append-only round / void alert; no prices or PII)
+// Fields:
+//   - id: string (required, == {comandaId}, 1..128 chars, immutable)
+//   - orderId: string (required, 1..128 chars, immutable)
+//   - locationId: string (required, 1..64 chars, immutable)
+//   - locationLabel: string (optional, 1..40 chars, immutable for non-admin)
+//   - zone: string (optional, enum: 'mesas' | 'toldos', immutable for non-admin)
+//   - ticketNumber: int (optional, 1..999999, immutable for non-admin)
+//   - roundNumber: int (optional, 1..999, immutable for non-admin)
+//   - waiterId: string (optional, 1..128 chars, immutable for non-admin)
+//   - waiterName: string (optional, 1..60 chars, immutable for non-admin)
+//   - items: list of maps (required, 1..50 items, immutable for cocina & mesonero)
+//   - status: string (required, enum: 'pendiente' | 'en_preparacion' | 'lista')
+//   - isVoidAlert: bool (required; must be false for mesonero create, immutable for non-admin)
+//   - voidReason: string (optional, 0..200 chars)
+//   - printStatus: string (optional, enum: 'pending' | 'printing' | 'printed' | 'printed_locally' | 'failed')
+//   - pendingSync: bool (optional)
+//   - createdAt: timestamp | ISO-8601 string (optional, immutable once set)
+//   - updatedAt: timestamp | ISO-8601 string (optional)
+//   - completedAt: timestamp | ISO-8601 string | null (optional)
+//
+// Collection: /orders/{orderId}
+// Document ID: orderId
+// Fields:
+//   - id: string (required, == {orderId}, 1..128 chars, immutable)
+//   - locationId: string (required, 1..64 chars, immutable)
+//   - locationLabel: string (optional, 1..40 chars)
+//   - zone: string (optional, enum: 'mesas' | 'toldos')
+//   - status: string (required, enum: 'abierta' | 'cerrada')
+//   - items: list of maps (required, 0..200 entries)
+//   - payments: list of maps (required, 0..20 entries; must be empty for mesonero)
+//   - totalUsd: number (required, 0..100000)
+//   - totalBs: number (optional, 0..1000000000)
+//   - exchangeRate: number | null (optional, > 0..1000000; frozen once status == 'cerrada')
+//   - voidedCount: int (optional, 0..200; immutable for mesonero)
+//   - waiterId: string (optional, 1..128 chars)
+//   - waiterName: string (optional, 1..60 chars)
+//   - shiftId: string | null (optional, 1..128 chars)
+//   - pendingSync: bool (optional)
+//   - createdAt: timestamp | ISO-8601 string (optional, immutable once set)
+//   - updatedAt: timestamp | ISO-8601 string (optional)
+//   - closedAt: timestamp | ISO-8601 string | null (optional)
+//   - closedBy: string | null (optional, 1..128 chars)
+//   NOTE: Mesonero read queries MUST filter `where('status', '==', 'abierta')` so
+//         closed orders & daily revenue totals remain strictly caja_admin only.
+//
+// Collection: /ingredients/{ingredientId}  [STRICTLY caja_admin ONLY]
+// Document ID: ingredientId
+// Fields:
+//   - id: string (required, == {ingredientId}, 1..64 chars, immutable)
+//   - name: string (required, 1..100 chars)
+//   - unit: string (required, enum: 'g' | 'kg' | 'ml' | 'L' | 'unidad')
+//   - stock: number (required, -1000000..10000000; negative stock allowed during rush)
+//   - minStock: number (required, 0..10000000)
+//   - unitCostUsd: number (optional, 0..100000)
+//   - category: string (optional, 0..50 chars)
+//   - active: bool (optional)
+//   - createdAt: timestamp | ISO-8601 string (optional, immutable once set)
+//   - updatedAt: timestamp | ISO-8601 string (optional)
+//
+// Collection: /inventoryMovements/{movementId}  [STRICTLY caja_admin ONLY]
+// Document ID: movementId (kardex audit trail)
+// Fields:
+//   - id: string (required, == {movementId}, 1..128 chars, immutable)
+//   - ingredientId: string (required, 1..64 chars, immutable)
+//   - ingredientName: string (optional, 1..100 chars)
+//   - type: string (required, enum: 'venta' | 'reposicion' | 'merma' | 'ajuste' |
+//                                   'anulacion' | 'restock' | 'sale' | 'waste' |
+//                                   'adjustment' | 'void_restock', immutable)
+//   - delta: number (required, != 0, -1000000..1000000, immutable)
+//   - unit: string (optional, enum: 'g' | 'kg' | 'ml' | 'L' | 'unidad')
+//   - stockAfter: number (optional, -1000000..10000000)
+//   - comandaId: string | null (optional, 1..128 chars, immutable)
+//   - orderId: string | null (optional, 1..128 chars, immutable)
+//   - reason: string (optional, 0..300 chars)
+//   - userId: string (optional, 1..128 chars)
+//   - createdAt: timestamp | ISO-8601 string (required, immutable)
+//
+// Collection: /shifts/{shiftId}  [STRICTLY caja_admin ONLY]
+// Document ID: shiftId
+// Fields:
+//   - id: string (required, == {shiftId}, 1..128 chars, immutable)
+//   - status: string (required, enum: 'abierto' | 'cerrado')
+//   - openedAt: timestamp | ISO-8601 string (required, immutable)
+//   - openedBy: string (optional, 1..128 chars, immutable)
+//   - closedAt: timestamp | ISO-8601 string | null (optional, immutable once cerrado)
+//   - closedBy: string | null (optional, 1..128 chars, immutable once cerrado)
+//   - exchangeRateAtClose: number | null (optional, > 0..1000000, immutable once cerrado)
+//   - orderCount: int (optional, 0..100000, immutable once cerrado)
+//   - totalUsd: number (optional, 0..10000000, immutable once cerrado)
+//   - totalBs: number (optional, 0..10000000000, immutable once cerrado)
+//   - totalsByMethod: map (optional, keys in ['zelle','efectivo_usd','debito_punto','efectivo_bs'])
+//   - notes: string (optional, 0..500 chars)
+//   - updatedAt: timestamp | ISO-8601 string (optional)
+//
+// Collection: /users/{userId}  [STRICTLY caja_admin ONLY — contains staff PINs]
+// Document ID: userId
+// Fields:
+//   - id: string (required, == {userId}, 1..128 chars, immutable)
+//   - name: string (required, 1..80 chars)
+//   - role: string (required, enum: 'mesonero' | 'cocina' | 'caja_admin')
+//   - pin: string (required, 4..128 chars — 4-digit PIN or salted hash)
+//   - active: bool (required)
+//   - createdAt: timestamp | ISO-8601 string (optional, immutable once set)
+//   - updatedAt: timestamp | ISO-8601 string (optional)
+//
+// Document: /settings/public  [Read: all active stations; Write: caja_admin ONLY]
+// Fields (strictly non-sensitive LAN print metadata — zero financial config):
+//   - restaurantName: string (required, 1..100 chars)
+//   - printer: map (required: ip, port, optional paperWidthMm, autoPrintStation, enabled)
+//   - updatedAt: timestamp | ISO-8601 string (optional)
+//
+// Collection: /settings/{docId} (docId != 'public')  [STRICTLY caja_admin ONLY]
+// Fields:
+//   - restaurantName: string (optional, 1..100 chars)
+//   - exchangeRate: number (optional, > 0..1000000)
+//   - exchangeRateUpdatedAt: timestamp | ISO-8601 string (optional)
+//   - printer: map (optional, same validated structure as public printer)
+//   - defaultCurrency: string (optional, enum: 'USD' | 'VES')
+//   - updatedAt: timestamp | ISO-8601 string (optional)
+//   - updatedBy: string (optional, 1..128 chars)
+//
+// Collection: /printJobs/{jobId}
+// Document ID: jobId (idempotent printJobId preventing duplicate 80mm tickets)
+// Fields:
+//   - id: string (required, == {jobId}, 1..128 chars, immutable)
+//   - type: string (required, enum: 'comanda' | 'anulacion' | 'precuenta' | 'cierre_caja' | 'test', immutable)
+//   - status: string (required, enum: 'pending' | 'printing' | 'printed' | 'printed_locally' | 'failed')
+//   - comandaId: string | null (optional, 1..128 chars, immutable)
+//   - orderId: string | null (optional, 1..128 chars, immutable)
+//   - shiftId: string | null (optional, 1..128 chars, immutable)
+//   - payloadText: string (optional, 1..8192 chars, immutable for non-admin)
+//   - copies: int (optional, 1..5)
+//   - attempts: int (optional, 0..20)
+//   - lastError: string | null (optional, 0..300 chars)
+//   - printedByStation: string | null (optional, enum: 'mesonero' | 'cocina' | 'caja_admin')
+//   - createdBy: string (optional, 1..128 chars, immutable)
+//   - createdAt: timestamp | ISO-8601 string (required, immutable)
+//   - updatedAt: timestamp | ISO-8601 string (optional)
+//   - printedAt: timestamp | ISO-8601 string | null (optional)
+//
+// ===============================================================
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ===============================================================
+    // Helper Functions — Authentication & Station RBAC
+    // ===============================================================
+
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    function uidUnchanged() {
+      return !('uid' in request.resource.data) ||
+        request.resource.data.uid == request.auth.uid;
+    }
+
+    function uidNotModified() {
+      return !('uid' in request.resource.data) ||
+        request.resource.data.uid == resource.data.uid;
+    }
+
+    function isValidRoleValue(r) {
+      return r is string && r in ['mesonero', 'cocina', 'caja_admin'];
+    }
+
+    function hasStationDoc() {
+      return exists(/databases/$(database)/documents/stationAuth/$(request.auth.uid));
+    }
+
+    function stationDoc() {
+      return get(/databases/$(database)/documents/stationAuth/$(request.auth.uid)).data;
+    }
+
+    // Checks authenticated user has active station role `r` via trusted
+    // Firebase Auth custom claim OR admin-managed `/stationAuth/{uid}` doc.
+    function hasRole(r) {
+      return isAuthenticated() && isValidRoleValue(r) && (
+        // Primary: trusted Auth custom claim (revoked if stationAuth marks active != true)
+        (('role' in request.auth.token) &&
+         request.auth.token.role == r &&
+         (!hasStationDoc() || stationDoc().active == true))
+        ||
+        // Fallback: admin-provisioned /stationAuth/{uid} document
+        (!('role' in request.auth.token) &&
+         hasStationDoc() &&
+         stationDoc().active == true &&
+         stationDoc().role == r)
+      );
+    }
+
+    function isAdmin() {
+      return hasRole('caja_admin');
+    }
+
+    function isMesonero() {
+      return hasRole('mesonero');
+    }
+
+    function isCocina() {
+      return hasRole('cocina');
+    }
+
+    function isAnyActiveStation() {
+      return isAdmin() || isMesonero() || isCocina();
+    }
+
+    // ===============================================================
+    // Helper Functions — Schema, Type, Range & Immutability Validators
+    // ===============================================================
+
+    function hasRequiredFields(data, fields) {
+      return data.keys().hasAll(fields);
+    }
+
+    function hasOnlyAllowedFields(data, fields) {
+      return data.keys().hasOnly(fields);
+    }
+
+    function areImmutableFieldsUnchanged(fields) {
+      return !request.resource.data.diff(resource.data).affectedKeys().hasAny(fields);
+    }
+
+    function isUnchangedIfPresent(field) {
+      return !(field in resource.data) ||
+        (field in request.resource.data && request.resource.data[field] == resource.data[field]);
+    }
+
+    function isValidString(val, minLen, maxLen) {
+      return val is string && val.size() >= minLen && val.size() <= maxLen;
+    }
+
+    function isOptionalString(data, field, minLen, maxLen) {
+      return !(field in data) || isValidString(data[field], minLen, maxLen);
+    }
+
+    function isNullableString(data, field, minLen, maxLen) {
+      return !(field in data) || data[field] == null || isValidString(data[field], minLen, maxLen);
+    }
+
+    function isOptionalBool(data, field) {
+      return !(field in data) || data[field] is bool;
+    }
+
+    function isValidNumberRange(val, minVal, maxVal) {
+      return val is number && val >= minVal && val <= maxVal;
+    }
+
+    function isOptionalNumberRange(data, field, minVal, maxVal) {
+      return !(field in data) || isValidNumberRange(data[field], minVal, maxVal);
+    }
+
+    function isOptionalIntRange(data, field, minVal, maxVal) {
+      return !(field in data) || (data[field] is int && data[field] >= minVal && data[field] <= maxVal);
+    }
+
+    // Format-validated ISO-8601 timestamp string (bounded length prevents 1MB DoS)
+    function isValidDateString(dateStr) {
+      return dateStr is string &&
+        dateStr.size() >= 19 &&
+        dateStr.size() <= 40 &&
+        dateStr.matches("^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,9})?(Z|[+-]\\d{2}:\\d{2})?$");
+    }
+
+    function isValidTimestampOrIso(val) {
+      return val is timestamp || isValidDateString(val);
+    }
+
+    function isOptionalTimestampOrIso(data, field) {
+      return !(field in data) || isValidTimestampOrIso(data[field]);
+    }
+
+    function isNullableTimestampOrIso(data, field) {
+      return !(field in data) || data[field] == null || isValidTimestampOrIso(data[field]);
+    }
+
+    function isValidZone(val) {
+      return val is string && val in ['mesas', 'toldos'];
+    }
+
+    function isValidUnit(val) {
+      return val is string && val in ['g', 'kg', 'ml', 'L', 'unidad'];
+    }
+
+    function isValidPrintStatus(val) {
+      return val is string && val in ['pending', 'printing', 'printed', 'printed_locally', 'failed'];
+    }
+
+    function isValidPrinterConfig(printer) {
+      return printer is map &&
+        hasOnlyAllowedFields(printer, ['ip', 'port', 'paperWidthMm', 'autoPrintStation', 'enabled']) &&
+        hasRequiredFields(printer, ['ip', 'port']) &&
+        isValidString(printer.ip, 1, 64) &&
+        printer.ip.matches("^[a-zA-Z0-9._-]+$") &&
+        printer.port is int && printer.port >= 1 && printer.port <= 65535 &&
+        (!('paperWidthMm' in printer) || (printer.paperWidthMm is int && printer.paperWidthMm in [58, 80])) &&
+        (!('autoPrintStation' in printer) || (printer.autoPrintStation is string && printer.autoPrintStation in ['cocina', 'emisor', 'caja_admin', 'manual'])) &&
+        isOptionalBool(printer, 'enabled');
+    }
+
+    // ===============================================================
+    // Domain Validators (MUST be called in BOTH create AND update)
+    // ===============================================================
+
+    function isValidStationAuth(data, uid) {
+      return hasOnlyAllowedFields(data, ['uid', 'role', 'active', 'label', 'deviceName', 'createdAt', 'updatedAt']) &&
+        hasRequiredFields(data, ['uid', 'role', 'active']) &&
+        isValidString(data.uid, 1, 128) &&
+        data.uid == uid &&
+        isValidRoleValue(data.role) &&
+        data.active is bool &&
+        isOptionalString(data, 'label', 1, 80) &&
+        isOptionalString(data, 'deviceName', 1, 80) &&
+        isOptionalTimestampOrIso(data, 'createdAt') &&
+        isOptionalTimestampOrIso(data, 'updatedAt');
+    }
+
+    function isValidLocation(data, locationId) {
+      return hasOnlyAllowedFields(data, [
+          'id', 'zone', 'number', 'label', 'status',
+          'activeOrderId', 'pendingSync', 'kitchenReadyAlert', 'updatedAt'
+        ]) &&
+        hasRequiredFields(data, ['id', 'zone', 'number', 'label', 'status']) &&
+        isValidString(data.id, 1, 64) &&
+        data.id == locationId &&
+        isValidZone(data.zone) &&
+        data.number is int && data.number >= 1 && data.number <= 100 &&
+        isValidString(data.label, 1, 40) &&
+        data.status in ['libre', 'ocupada', 'por_cobrar'] &&
+        isNullableString(data, 'activeOrderId', 1, 128) &&
+        isOptionalBool(data, 'pendingSync') &&
+        isOptionalBool(data, 'kitchenReadyAlert') &&
+        isOptionalTimestampOrIso(data, 'updatedAt');
+    }
+
+    function isValidMenuItem(data, menuItemId) {
+      return hasOnlyAllowedFields(data, [
+          'id', 'name', 'category', 'priceUsd', 'sendsToKitchen',
+          'outOfStock', 'active', 'description', 'recipe', 'createdAt', 'updatedAt'
+        ]) &&
+        hasRequiredFields(data, ['id', 'name', 'category', 'priceUsd', 'sendsToKitchen', 'outOfStock']) &&
+        isValidString(data.id, 1, 64) &&
+        data.id == menuItemId &&
+        isValidString(data.name, 1, 100) &&
+        isValidString(data.category, 1, 50) &&
+        isValidNumberRange(data.priceUsd, 0, 10000) &&
+        data.sendsToKitchen is bool &&
+        data.outOfStock is bool &&
+        isOptionalBool(data, 'active') &&
+        isOptionalString(data, 'description', 0, 300) &&
+        (!('recipe' in data) || (data.recipe is list && data.recipe.size() <= 30 && (data.recipe.size() == 0 || data.recipe[0] is map))) &&
+        isOptionalTimestampOrIso(data, 'createdAt') &&
+        isOptionalTimestampOrIso(data, 'updatedAt');
+    }
+
+    function isValidComanda(data, comandaId) {
+      return hasOnlyAllowedFields(data, [
+          'id', 'orderId', 'locationId', 'locationLabel', 'zone',
+          'ticketNumber', 'roundNumber', 'waiterId', 'waiterName',
+          'items', 'status', 'isVoidAlert', 'voidReason',
+          'printStatus', 'pendingSync', 'createdAt', 'updatedAt', 'completedAt'
+        ]) &&
+        hasRequiredFields(data, ['id', 'orderId', 'locationId', 'items', 'status', 'isVoidAlert']) &&
+        isValidString(data.id, 1, 128) &&
+        data.id == comandaId &&
+        isValidString(data.orderId, 1, 128) &&
+        isValidString(data.locationId, 1, 64) &&
+        isOptionalString(data, 'locationLabel', 1, 40) &&
+        (!('zone' in data) || isValidZone(data.zone)) &&
+        isOptionalIntRange(data, 'ticketNumber', 1, 999999) &&
+        isOptionalIntRange(data, 'roundNumber', 1, 999) &&
+        isOptionalString(data, 'waiterId', 1, 128) &&
+        isOptionalString(data, 'waiterName', 1, 60) &&
+        data.items is list && data.items.size() >= 1 && data.items.size() <= 50 && data.items[0] is map &&
+        data.status in ['pendiente', 'en_preparacion', 'lista'] &&
+        data.isVoidAlert is bool &&
+        isOptionalString(data, 'voidReason', 0, 200) &&
+        (!('printStatus' in data) || isValidPrintStatus(data.printStatus)) &&
+        isOptionalBool(data, 'pendingSync') &&
+        isOptionalTimestampOrIso(data, 'createdAt') &&
+        isOptionalTimestampOrIso(data, 'updatedAt') &&
+        isNullableTimestampOrIso(data, 'completedAt');
+    }
+
+    function isValidOrder(data, orderId) {
+      return hasOnlyAllowedFields(data, [
+          'id', 'locationId', 'locationLabel', 'zone', 'status',
+          'items', 'payments', 'totalUsd', 'totalBs', 'exchangeRate',
+          'voidedCount', 'waiterId', 'waiterName', 'shiftId',
+          'pendingSync', 'createdAt', 'updatedAt', 'closedAt', 'closedBy'
+        ]) &&
+        hasRequiredFields(data, ['id', 'locationId', 'status', 'items', 'payments', 'totalUsd']) &&
+        isValidString(data.id, 1, 128) &&
+        data.id == orderId &&
+        isValidString(data.locationId, 1, 64) &&
+        isOptionalString(data, 'locationLabel', 1, 40) &&
+        (!('zone' in data) || isValidZone(data.zone)) &&
+        data.status in ['abierta', 'cerrada'] &&
+        data.items is list && data.items.size() <= 200 && (data.items.size() == 0 || data.items[0] is map) &&
+        data.payments is list && data.payments.size() <= 20 && (data.payments.size() == 0 || data.payments[0] is map) &&
+        isValidNumberRange(data.totalUsd, 0, 100000) &&
+        isOptionalNumberRange(data, 'totalBs', 0, 1000000000) &&
+        (!('exchangeRate' in data) || data.exchangeRate == null || (data.exchangeRate is number && data.exchangeRate > 0 && data.exchangeRate <= 1000000)) &&
+        isOptionalIntRange(data, 'voidedCount', 0, 200) &&
+        isOptionalString(data, 'waiterId', 1, 128) &&
+        isOptionalString(data, 'waiterName', 1, 60) &&
+        isNullableString(data, 'shiftId', 1, 128) &&
+        isOptionalBool(data, 'pendingSync') &&
+        isOptionalTimestampOrIso(data, 'createdAt') &&
+        isOptionalTimestampOrIso(data, 'updatedAt') &&
+        isNullableTimestampOrIso(data, 'closedAt') &&
+        isNullableString(data, 'closedBy', 1, 128);
+    }
+
+    function isValidIngredient(data, ingredientId) {
+      return hasOnlyAllowedFields(data, [
+          'id', 'name', 'unit', 'stock', 'minStock',
+          'unitCostUsd', 'category', 'active', 'createdAt', 'updatedAt'
+        ]) &&
+        hasRequiredFields(data, ['id', 'name', 'unit', 'stock', 'minStock']) &&
+        isValidString(data.id, 1, 64) &&
+        data.id == ingredientId &&
+        isValidString(data.name, 1, 100) &&
+        isValidUnit(data.unit) &&
+        // Negative stock explicitly allowed during rush hour per POS spec
+        isValidNumberRange(data.stock, -1000000, 10000000) &&
+        isValidNumberRange(data.minStock, 0, 10000000) &&
+        isOptionalNumberRange(data, 'unitCostUsd', 0, 100000) &&
+        isOptionalString(data, 'category', 0, 50) &&
+        isOptionalBool(data, 'active') &&
+        isOptionalTimestampOrIso(data, 'createdAt') &&
+        isOptionalTimestampOrIso(data, 'updatedAt');
+    }
+
+    function isValidInventoryMovement(data, movementId) {
+      return hasOnlyAllowedFields(data, [
+          'id', 'ingredientId', 'ingredientName', 'type', 'delta',
+          'unit', 'stockAfter', 'comandaId', 'orderId', 'reason', 'userId', 'createdAt'
+        ]) &&
+        hasRequiredFields(data, ['id', 'ingredientId', 'type', 'delta', 'createdAt']) &&
+        isValidString(data.id, 1, 128) &&
+        data.id == movementId &&
+        isValidString(data.ingredientId, 1, 64) &&
+        isOptionalString(data, 'ingredientName', 1, 100) &&
+        data.type in [
+          'venta', 'reposicion', 'merma', 'ajuste', 'anulacion',
+          'restock', 'sale', 'waste', 'adjustment', 'void_restock'
+        ] &&
+        isValidNumberRange(data.delta, -1000000, 1000000) &&
+        data.delta != 0 &&
+        (!('unit' in data) || isValidUnit(data.unit)) &&
+        isOptionalNumberRange(data, 'stockAfter', -1000000, 10000000) &&
+        isNullableString(data, 'comandaId', 1, 128) &&
+        isNullableString(data, 'orderId', 1, 128) &&
+        isOptionalString(data, 'reason', 0, 300) &&
+        isOptionalString(data, 'userId', 1, 128) &&
+        isValidTimestampOrIso(data.createdAt);
+    }
+
+    function isValidShift(data, shiftId) {
+      return hasOnlyAllowedFields(data, [
+          'id', 'status', 'openedAt', 'openedBy', 'closedAt', 'closedBy',
+          'exchangeRateAtClose', 'orderCount', 'totalUsd', 'totalBs',
+          'totalsByMethod', 'notes', 'updatedAt'
+        ]) &&
+        hasRequiredFields(data, ['id', 'status', 'openedAt']) &&
+        isValidString(data.id, 1, 128) &&
+        data.id == shiftId &&
+        data.status in ['abierto', 'cerrado'] &&
+        isValidTimestampOrIso(data.openedAt) &&
+        isOptionalString(data, 'openedBy', 1, 128) &&
+        isNullableTimestampOrIso(data, 'closedAt') &&
+        isNullableString(data, 'closedBy', 1, 128) &&
+        (!('exchangeRateAtClose' in data) || data.exchangeRateAtClose == null || (data.exchangeRateAtClose is number && data.exchangeRateAtClose > 0 && data.exchangeRateAtClose <= 1000000)) &&
+        isOptionalIntRange(data, 'orderCount', 0, 100000) &&
+        isOptionalNumberRange(data, 'totalUsd', 0, 10000000) &&
+        isOptionalNumberRange(data, 'totalBs', 0, 10000000000) &&
+        (!('totalsByMethod' in data) || (
+          data.totalsByMethod is map &&
+          hasOnlyAllowedFields(data.totalsByMethod, ['zelle', 'efectivo_usd', 'debito_punto', 'efectivo_bs'])
+        )) &&
+        isOptionalString(data, 'notes', 0, 500) &&
+        isOptionalTimestampOrIso(data, 'updatedAt');
+    }
+
+    function isValidUserProfile(data, userId) {
+      return hasOnlyAllowedFields(data, ['id', 'name', 'role', 'pin', 'active', 'createdAt', 'updatedAt']) &&
+        hasRequiredFields(data, ['id', 'name', 'role', 'pin', 'active']) &&
+        isValidString(data.id, 1, 128) &&
+        data.id == userId &&
+        isValidString(data.name, 1, 80) &&
+        isValidRoleValue(data.role) &&
+        isValidString(data.pin, 4, 128) &&
+        data.active is bool &&
+        isOptionalTimestampOrIso(data, 'createdAt') &&
+        isOptionalTimestampOrIso(data, 'updatedAt');
+    }
+
+    function isValidPublicSettings(data) {
+      return hasOnlyAllowedFields(data, ['restaurantName', 'printer', 'updatedAt']) &&
+        hasRequiredFields(data, ['restaurantName', 'printer']) &&
+        isValidString(data.restaurantName, 1, 100) &&
+        isValidPrinterConfig(data.printer) &&
+        isOptionalTimestampOrIso(data, 'updatedAt');
+    }
+
+    function isValidAdminSettings(data) {
+      return hasOnlyAllowedFields(data, [
+          'restaurantName', 'exchangeRate', 'exchangeRateUpdatedAt',
+          'printer', 'defaultCurrency', 'updatedAt', 'updatedBy'
+        ]) &&
+        isOptionalString(data, 'restaurantName', 1, 100) &&
+        (!('exchangeRate' in data) || (data.exchangeRate is number && data.exchangeRate > 0 && data.exchangeRate <= 1000000)) &&
+        isOptionalTimestampOrIso(data, 'exchangeRateUpdatedAt') &&
+        (!('printer' in data) || isValidPrinterConfig(data.printer)) &&
+        (!('defaultCurrency' in data) || (data.defaultCurrency is string && data.defaultCurrency in ['USD', 'VES'])) &&
+        isOptionalTimestampOrIso(data, 'updatedAt') &&
+        isOptionalString(data, 'updatedBy', 1, 128);
+    }
+
+    function isValidPrintJob(data, jobId) {
+      return hasOnlyAllowedFields(data, [
+          'id', 'type', 'status', 'comandaId', 'orderId', 'shiftId',
+          'payloadText', 'copies', 'attempts', 'lastError',
+          'printedByStation', 'createdBy', 'createdAt', 'updatedAt', 'printedAt'
+        ]) &&
+        hasRequiredFields(data, ['id', 'type', 'status', 'createdAt']) &&
+        isValidString(data.id, 1, 128) &&
+        data.id == jobId &&
+        data.type in ['comanda', 'anulacion', 'precuenta', 'cierre_caja', 'test'] &&
+        isValidPrintStatus(data.status) &&
+        isNullableString(data, 'comandaId', 1, 128) &&
+        isNullableString(data, 'orderId', 1, 128) &&
+        isNullableString(data, 'shiftId', 1, 128) &&
+        isOptionalString(data, 'payloadText', 1, 8192) &&
+        isOptionalIntRange(data, 'copies', 1, 5) &&
+        isOptionalIntRange(data, 'attempts', 0, 20) &&
+        isNullableString(data, 'lastError', 0, 300) &&
+        (!('printedByStation' in data) || data.printedByStation == null || isValidRoleValue(data.printedByStation)) &&
+        isOptionalString(data, 'createdBy', 1, 128) &&
+        isValidTimestampOrIso(data.createdAt) &&
+        isOptionalTimestampOrIso(data, 'updatedAt') &&
+        isNullableTimestampOrIso(data, 'printedAt');
+    }
+
+    // ===============================================================
+    // Role-Scoped State Transition & Business Logic Validators
+    // ===============================================================
+
+    // Mesonero location updates:
+    // - Only operational fields allowed (never zone, number, label, id).
+    // - Cannot close/free an occupied table (`libre`) or clear/replace an activeOrderId.
+    function isValidMesoneroLocationUpdate() {
+      let changed = request.resource.data.diff(resource.data).affectedKeys();
+      let prevStatus = resource.data.status;
+      let nextStatus = request.resource.data.status;
+      let hadOrder = ('activeOrderId' in resource.data) && resource.data.activeOrderId != null;
+      let hasOrder = ('activeOrderId' in request.resource.data) && request.resource.data.activeOrderId != null;
+
+      return changed.hasOnly(['status', 'activeOrderId', 'pendingSync', 'kitchenReadyAlert', 'updatedAt']) &&
+        // Once an order is attached, mesonero cannot clear or swap activeOrderId
+        (!hadOrder || (hasOrder && request.resource.data.activeOrderId == resource.data.activeOrderId)) &&
+        // Allowed status transitions for mesonero (closing to 'libre' is caja_admin only)
+        (
+          (prevStatus == 'libre' && nextStatus == 'libre' && !hasOrder) ||
+          (prevStatus == 'libre' && nextStatus == 'ocupada' && hasOrder) ||
+          (prevStatus == 'ocupada' && nextStatus in ['ocupada', 'por_cobrar']) ||
+          (prevStatus == 'por_cobrar' && nextStatus in ['por_cobrar', 'ocupada'])
+        );
+    }
+
+    // Cocina comanda updates:
+    // - Only status, printStatus, updatedAt, completedAt allowed.
+    // - Enforces forward KDS progression (void alerts may jump directly to 'lista').
+    function isValidCocinaComandaUpdate() {
+      let changed = request.resource.data.diff(resource.data).affectedKeys();
+      let prev = resource.data.status;
+      let next = request.resource.data.status;
+
+      return changed.hasOnly(['status', 'printStatus', 'updatedAt', 'completedAt']) &&
+        (
+          next == prev ||
+          (prev == 'pendiente' && next == 'en_preparacion') ||
+          (prev == 'en_preparacion' && next == 'lista') ||
+          (prev == 'pendiente' && next == 'lista' && resource.data.isVoidAlert == true)
+        );
+    }
+
+    // Mesonero comanda updates:
+    // - Strictly limited to LAN print fallback (`printStatus == 'printed_locally'`)
+    //   and clearing offline sync badge (`pendingSync == false`).
+    function isValidMesoneroComandaUpdate() {
+      let changed = request.resource.data.diff(resource.data).affectedKeys();
+
+      return changed.hasOnly(['printStatus', 'pendingSync', 'updatedAt']) &&
+        (!changed.hasAny(['printStatus']) || (
+          request.resource.data.printStatus == 'printed_locally' &&
+          (!('printStatus' in resource.data) || resource.data.printStatus in ['pending', 'failed'])
+        )) &&
+        (!changed.hasAny(['pendingSync']) || request.resource.data.pendingSync == false);
+    }
+
+    // Mesonero order updates:
+    // - Only open orders with 0 payments; cannot close, add payments, remove/void items, or reduce totalUsd.
+    function isValidMesoneroOrderUpdate() {
+      let changed = request.resource.data.diff(resource.data).affectedKeys();
+      let prevItems = resource.data.items;
+      let nextItems = request.resource.data.items;
+
+      return resource.data.status == 'abierta' &&
+        resource.data.payments.size() == 0 &&
+        request.resource.data.status == 'abierta' &&
+        request.resource.data.payments.size() == 0 &&
+        changed.hasOnly(['items', 'totalUsd', 'totalBs', 'updatedAt', 'pendingSync', 'waiterId', 'waiterName']) &&
+        areImmutableFieldsUnchanged([
+          'id', 'locationId', 'locationLabel', 'zone', 'status', 'payments',
+          'exchangeRate', 'voidedCount', 'shiftId', 'closedAt', 'closedBy', 'createdAt'
+        ]) &&
+        // Append-only item protection: cannot shrink item list, drop totalUsd, or overwrite boundary items
+        nextItems.size() >= prevItems.size() &&
+        request.resource.data.totalUsd >= resource.data.totalUsd &&
+        (prevItems.size() == 0 || (
+          nextItems[0] == prevItems[0] &&
+          nextItems[prevItems.size() - 1] == prevItems[prevItems.size() - 1]
+        ));
+    }
+
+    // Admin order updates:
+    // - Protects core IDs and freezes financial snapshot once an order is 'cerrada'
+    //   so future exchange-rate changes can never alter historical closed orders.
+    function isValidAdminOrderUpdate() {
+      return areImmutableFieldsUnchanged(['id', 'locationId']) &&
+        isUnchangedIfPresent('createdAt') &&
+        (resource.data.status == 'abierta' || areImmutableFieldsUnchanged([
+          'status', 'items', 'payments', 'totalUsd', 'totalBs',
+          'exchangeRate', 'closedAt', 'closedBy', 'shiftId'
+        ]));
+    }
+
+    // Admin shift updates:
+    // - Freezes financial totals once a shift is 'cerrado' (only notes/updatedAt editable).
+    function isValidAdminShiftUpdate() {
+      return areImmutableFieldsUnchanged(['id', 'openedAt']) &&
+        isUnchangedIfPresent('openedBy') &&
+        (resource.data.status == 'abierto' || areImmutableFieldsUnchanged([
+          'status', 'closedAt', 'closedBy', 'exchangeRateAtClose',
+          'orderCount', 'totalUsd', 'totalBs', 'totalsByMethod'
+        ]));
+    }
+
+    // Cocina printJob updates:
+    // - Serialized print coordinator may only update execution state & error/retry metadata.
+    function isValidCocinaPrintJobUpdate() {
+      let changed = request.resource.data.diff(resource.data).affectedKeys();
+      return changed.hasOnly(['status', 'attempts', 'lastError', 'printedAt', 'updatedAt', 'printedByStation']);
+    }
+
+    // Mesonero printJob updates:
+    // - Strictly limited to marking a pending/failed comanda job as 'printed_locally' (LAN fallback).
+    function isValidMesoneroPrintJobUpdate() {
+      let changed = request.resource.data.diff(resource.data).affectedKeys();
+      return resource.data.type == 'comanda' &&
+        resource.data.status in ['pending', 'failed'] &&
+        changed.hasOnly(['status', 'printedAt', 'updatedAt', 'printedByStation']) &&
+        request.resource.data.status == 'printed_locally';
+    }
+
+    // ===============================================================
+    // Collection Rules
+    // ===============================================================
+
+    // 1. /stationAuth/{uid}
+    // Readable by owner tablet or caja_admin; writable ONLY by caja_admin (zero self-escalation).
+    match /stationAuth/{uid} {
+      allow read: if isOwner(uid) || isAdmin();
+      allow create: if isAdmin() && isValidStationAuth(request.resource.data, uid);
+      allow update: if isAdmin() &&
+        isValidStationAuth(request.resource.data, uid) &&
+        uidNotModified() &&
+        areImmutableFieldsUnchanged(['uid']) &&
+        isUnchangedIfPresent('createdAt');
+      allow delete: if isAdmin();
+    }
+
+    // 2. /locations/{locationId} (10 mesas + 18 toldos)
+    // Read: mesonero & caja_admin (DENIED to cocina).
+    // Mesonero: status/activeOrderId/pendingSync/kitchenReadyAlert transitions only.
+    // Caja/Admin: full CRUD.
+    match /locations/{locationId} {
+      allow read: if isMesonero() || isAdmin();
+      allow create: if isAdmin() && isValidLocation(request.resource.data, locationId);
+      allow update: if isValidLocation(request.resource.data, locationId) && (
+        (isAdmin() && areImmutableFieldsUnchanged(['id'])) ||
+        (isMesonero() && isValidMesoneroLocationUpdate())
+      );
+      allow delete: if isAdmin();
+    }
+
+    // 3. /menu/{menuItemId}
+    // Read: mesonero & caja_admin (DENIED to cocina).
+    // Write: caja_admin ONLY.
+    match /menu/{menuItemId} {
+      allow read: if isMesonero() || isAdmin();
+      allow create: if isAdmin() && isValidMenuItem(request.resource.data, menuItemId);
+      allow update: if isAdmin() &&
+        isValidMenuItem(request.resource.data, menuItemId) &&
+        areImmutableFieldsUnchanged(['id']) &&
+        isUnchangedIfPresent('createdAt');
+      allow delete: if isAdmin();
+    }
+
+    // 4. /comandas/{comandaId}
+    // Read: mesonero, cocina, caja_admin.
+    // Create: mesonero (pendiente, non-void, >=1 item) or caja_admin (incl. void alerts).
+    // Update: cocina (KDS status/printStatus), mesonero (LAN fallback/sync), caja_admin (full).
+    match /comandas/{comandaId} {
+      allow read: if isAnyActiveStation();
+      allow create: if isValidComanda(request.resource.data, comandaId) && (
+        isAdmin() ||
+        (isMesonero() &&
+         request.resource.data.status == 'pendiente' &&
+         request.resource.data.isVoidAlert == false &&
+         (!('printStatus' in request.resource.data) || request.resource.data.printStatus in ['pending', 'printed_locally']))
+      );
+      allow update: if isValidComanda(request.resource.data, comandaId) && (
+        (isAdmin() && areImmutableFieldsUnchanged(['id', 'orderId', 'locationId']) && isUnchangedIfPresent('createdAt')) ||
+        (isCocina() && isValidCocinaComandaUpdate()) ||
+        (isMesonero() && isValidMesoneroComandaUpdate())
+      );
+      allow delete: if isAdmin();
+    }
+
+    // 5. /orders/{orderId}
+    // Read: caja_admin (all) or mesonero (open orders ONLY; DENIED to cocina).
+    // Create/Update by mesonero: open orders with 0 payments only; no closing, payments, or voids.
+    // Caja/Admin: full CRUD (settling, payments, voids) with frozen closed-order history.
+    match /orders/{orderId} {
+      allow read: if isAdmin() || (isMesonero() && (resource == null || resource.data.status == 'abierta'));
+      allow create: if isValidOrder(request.resource.data, orderId) && (
+        isAdmin() ||
+        (isMesonero() &&
+         request.resource.data.status == 'abierta' &&
+         request.resource.data.payments.size() == 0 &&
+         (!('closedAt' in request.resource.data) || request.resource.data.closedAt == null) &&
+         (!('closedBy' in request.resource.data) || request.resource.data.closedBy == null) &&
+         (!('shiftId' in request.resource.data) || request.resource.data.shiftId == null) &&
+         (!('voidedCount' in request.resource.data) || request.resource.data.voidedCount == 0))
+      );
+      allow update: if isValidOrder(request.resource.data, orderId) && (
+        (isAdmin() && isValidAdminOrderUpdate()) ||
+        (isMesonero() && isValidMesoneroOrderUpdate())
+      );
+      allow delete: if isAdmin();
+    }
+
+    // 6a. /ingredients/{ingredientId} — STRICTLY caja_admin ONLY
+    match /ingredients/{ingredientId} {
+      allow read: if isAdmin();
+      allow create: if isAdmin() && isValidIngredient(request.resource.data, ingredientId);
+      allow update: if isAdmin() &&
+        isValidIngredient(request.resource.data, ingredientId) &&
+        areImmutableFieldsUnchanged(['id']) &&
+        isUnchangedIfPresent('createdAt');
+      allow delete: if isAdmin();
+    }
+
+    // 6b. /inventoryMovements/{movementId} — STRICTLY caja_admin ONLY (audit kardex)
+    match /inventoryMovements/{movementId} {
+      allow read: if isAdmin();
+      allow create: if isAdmin() && isValidInventoryMovement(request.resource.data, movementId);
+      allow update: if isAdmin() &&
+        isValidInventoryMovement(request.resource.data, movementId) &&
+        areImmutableFieldsUnchanged(['id', 'ingredientId', 'type', 'delta', 'comandaId', 'orderId', 'createdAt']);
+      allow delete: if isAdmin();
+    }
+
+    // 6c. /shifts/{shiftId} — STRICTLY caja_admin ONLY (cash close / turnos)
+    match /shifts/{shiftId} {
+      allow read: if isAdmin();
+      allow create: if isAdmin() && isValidShift(request.resource.data, shiftId);
+      allow update: if isAdmin() &&
+        isValidShift(request.resource.data, shiftId) &&
+        isValidAdminShiftUpdate();
+      allow delete: if isAdmin();
+    }
+
+    // 6d. /users/{userId} — STRICTLY caja_admin ONLY (staff profiles & 4-digit PINs)
+    match /users/{userId} {
+      allow read: if isAdmin();
+      allow create: if isAdmin() && isValidUserProfile(request.resource.data, userId);
+      allow update: if isAdmin() &&
+        isValidUserProfile(request.resource.data, userId) &&
+        areImmutableFieldsUnchanged(['id']) &&
+        isUnchangedIfPresent('createdAt');
+      allow delete: if isAdmin();
+    }
+
+    // 6e. /settings/public — Read by all active stations (LAN printer IP/port & restaurant name ONLY)
+    //     Write: caja_admin ONLY.
+    match /settings/public {
+      allow read: if isAnyActiveStation();
+      allow create: if isAdmin() && isValidPublicSettings(request.resource.data);
+      allow update: if isAdmin() && isValidPublicSettings(request.resource.data);
+      allow delete: if isAdmin();
+    }
+
+    // 6f. /settings/{docId} (all other settings docs, e.g. exchangeRate) — STRICTLY caja_admin ONLY
+    match /settings/{docId} {
+      allow read: if docId != 'public' && isAdmin();
+      allow create: if docId != 'public' && isAdmin() && isValidAdminSettings(request.resource.data);
+      allow update: if docId != 'public' && isAdmin() && isValidAdminSettings(request.resource.data);
+      allow delete: if docId != 'public' && isAdmin();
+    }
+
+    // 7. /printJobs/{jobId}
+    // Read/Create: mesonero (comanda jobs only), cocina (comanda/anulacion/test), caja_admin (all).
+    // Update: cocina (print state), caja_admin (full), mesonero (status == 'printed_locally' only).
+    // Delete: caja_admin ONLY.
+    match /printJobs/{jobId} {
+      allow read: if isAnyActiveStation();
+      allow create: if isValidPrintJob(request.resource.data, jobId) && (
+        isAdmin() ||
+        (isCocina() &&
+         request.resource.data.type in ['comanda', 'anulacion', 'test'] &&
+         request.resource.data.status in ['pending', 'printing']) ||
+        (isMesonero() &&
+         request.resource.data.type == 'comanda' &&
+         request.resource.data.status in ['pending', 'printed_locally'])
+      );
+      allow update: if isValidPrintJob(request.resource.data, jobId) && (
+        (isAdmin() && areImmutableFieldsUnchanged(['id', 'type', 'createdAt'])) ||
+        (isCocina() && isValidCocinaPrintJobUpdate()) ||
+        (isMesonero() && isValidMesoneroPrintJobUpdate())
+      );
+      allow delete: if isAdmin();
+    }
+
+    // ===============================================================
+    // Default Deny — Reject all unmatched collections & subcollections
+    // ===============================================================
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
