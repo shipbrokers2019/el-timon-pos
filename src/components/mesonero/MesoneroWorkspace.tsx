@@ -105,11 +105,20 @@ export function MesoneroWorkspace() {
         {/* Location grid + OrderComposer split layout */}
         <div
           className={`grid gap-5 items-start ${
-            selectedLocation ? 'grid-cols-1 lg:grid-cols-[1fr_430px]' : 'grid-cols-1'
+            selectedLocation ? 'grid-cols-1 lg:grid-cols-[minmax(0,1fr)_420px]' : 'grid-cols-1'
           }`}
         >
-          <section aria-label={activeZone === 'mesas' ? 'Mesas' : 'Toldos Playa'}>
-            <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 xl:grid-cols-5 gap-3">
+          <section
+            aria-label={activeZone === 'mesas' ? 'Mesas' : 'Toldos Playa'}
+            className="min-w-0"
+          >
+            <div
+              className={`grid gap-3 ${
+                selectedLocation
+                  ? 'grid-cols-2 sm:grid-cols-3 lg:grid-cols-2 xl:grid-cols-3'
+                  : 'grid-cols-2 sm:grid-cols-3 md:grid-cols-4 xl:grid-cols-5'
+              }`}
+            >
               {visibleLocations.map((loc) => {
                 const badge = STATUS_BADGES[loc.status];
                 const activeOrder = loc.activeOrderId

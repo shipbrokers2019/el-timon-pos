@@ -163,7 +163,7 @@ export class LocalPosRepository implements PosRepository {
   private offlineQueue: Set<string>;
   private readonly listeners = new Set<(state: PosState) => void>();
   private readonly instanceId = createId('tab');
-  private readonly channel: BroadcastChannel | null;
+  private channel: BroadcastChannel | null = null;
 
   constructor() {
     const savedState = readJsonStorage<PosState>(POS_STORAGE_KEY);
@@ -177,19 +177,27 @@ export class LocalPosRepository implements PosRepository {
     const savedQueue = readJsonStorage<string[]>(POS_OFFLINE_QUEUE_KEY);
     this.offlineQueue = new Set(Array.isArray(savedQueue) ? savedQueue : []);
 
-    if (typeof BroadcastChannel !== 'undefined') {
-      this.channel = new BroadcastChannel(POS_BROADCAST_CHANNEL);
-      this.channel.onmessage = (event: MessageEvent<BroadcastSyncMessage>) => {
-        if (!event.data || event.data.sourceId === this.instanceId) {
-          return;
-        }
-        this.state = event.data.state;
-        this.offlineQueue = new Set(event.data.offlineQueue ?? []);
-        this.notifyListeners();
-      };
-    } else {
-      this.channel = null;
+    this.ensureChannel();
+  }
+
+  private ensureChannel(): BroadcastChannel | null {
+    if (this.channel) {
+      return this.channel;
     }
+    if (typeof BroadcastChannel === 'undefined') {
+      return null;
+    }
+    const ch = new BroadcastChannel(POS_BROADCAST_CHANNEL);
+    ch.onmessage = (event: MessageEvent<BroadcastSyncMessage>) => {
+      if (!event.data || event.data.sourceId === this.instanceId) {
+        return;
+      }
+      this.state = event.data.state;
+      this.offlineQueue = new Set(event.data.offlineQueue ?? []);
+      this.notifyListeners();
+    };
+    this.channel = ch;
+    return ch;
   }
 
   getState(): PosState {
@@ -211,6 +219,7 @@ export class LocalPosRepository implements PosRepository {
   }
 
   subscribe(listener: (state: PosState) => void): () => void {
+    this.ensureChannel();
     this.listeners.add(listener);
     return () => {
       this.listeners.delete(listener);
@@ -229,18 +238,38 @@ export class LocalPosRepository implements PosRepository {
 
   dispose(): void {
     this.channel?.close();
+    this.channel = null;
     this.listeners.clear();
+  }
+
+  private postBroadcast(message: BroadcastSyncMessage): void {
+    const channel = this.ensureChannel();
+    if (!channel) {
+      return;
+    }
+    try {
+      channel.postMessage(message);
+    } catch {
+      // Recover if the channel was closed externally (e.g. React StrictMode remount)
+      this.channel = null;
+      const reopened = this.ensureChannel();
+      try {
+        reopened?.postMessage(message);
+      } catch {
+        // Ignore broadcast failure; localStorage persistence still succeeded
+      }
+    }
   }
 
   private commit(nextState: PosState): void {
     this.state = nextState;
     writeJsonStorage(POS_STORAGE_KEY, this.state);
     writeJsonStorage(POS_OFFLINE_QUEUE_KEY, Array.from(this.offlineQueue));
-    this.channel?.postMessage({
+    this.postBroadcast({
       sourceId: this.instanceId,
       state: this.state,
       offlineQueue: Array.from(this.offlineQueue),
-    } satisfies BroadcastSyncMessage);
+    });
     this.notifyListeners();
   }
 

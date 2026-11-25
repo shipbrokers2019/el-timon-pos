@@ -338,6 +338,9 @@ export class FirebasePosRepository implements PosRepository {
   }
 
   subscribe(listener: (state: PosState) => void): () => void {
+    if (this.unsubscribes.length === 0) {
+      this.attachListeners();
+    }
     return this.local.subscribe(listener);
   }
 

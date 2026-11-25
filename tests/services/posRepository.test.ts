@@ -302,4 +302,54 @@ describe('seedData & LocalPosRepository', () => {
     ).toBe(carneAfterFirst);
     expect(repo.getState().movements).toHaveLength(movementsAfterFirst);
   });
+
+  it('reopens BroadcastChannel cleanly after dispose() (React StrictMode remount resilience)', async () => {
+    const OriginalBroadcastChannel = globalThis.BroadcastChannel;
+    const postedMessages: unknown[] = [];
+
+    class StrictMockBroadcastChannel {
+      name: string;
+      closed = false;
+      onmessage: ((event: MessageEvent) => void) | null = null;
+      constructor(name: string) {
+        this.name = name;
+      }
+      postMessage(data: unknown) {
+        if (this.closed) {
+          throw new DOMException(
+            "Failed to execute 'postMessage' on 'BroadcastChannel': Channel is closed",
+            'InvalidStateError',
+          );
+        }
+        postedMessages.push(data);
+      }
+      close() {
+        this.closed = true;
+      }
+    }
+
+    globalThis.BroadcastChannel = StrictMockBroadcastChannel as unknown as typeof BroadcastChannel;
+    try {
+      const repo = new LocalPosRepository();
+      // Simulate React 19 StrictMode unmount -> dispose -> remount -> subscribe on same instance
+      repo.dispose();
+      const listener = vi.fn();
+      const unsub = repo.subscribe(listener);
+
+      const { order } = await repo.submitComanda({
+        locationId: 'mesa-1',
+        waiterId: 'user-carlos',
+        waiterName: 'Carlos (Mesonero)',
+        items: [{ menuItemId: 'menu-hamburguesa-playera', quantity: 2, notes: 'TERMINO MEDIO' }],
+      });
+
+      expect(order.status).toBe('abierta');
+      expect(repo.getState().locations.find((l) => l.id === 'mesa-1')?.status).toBe('ocupada');
+      expect(postedMessages.length).toBeGreaterThanOrEqual(1);
+      expect(listener).toHaveBeenCalled();
+      unsub();
+    } finally {
+      globalThis.BroadcastChannel = OriginalBroadcastChannel;
+    }
+  });
 });

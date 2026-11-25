@@ -332,17 +332,23 @@ export function CajaFloorView() {
       {/* Floor Grid + Account Detail Split */}
       <div
         className={`grid gap-5 items-start ${
-          selectedLocation ? 'grid-cols-1 xl:grid-cols-[1fr_440px]' : 'grid-cols-1'
+          selectedLocation ? 'grid-cols-1 xl:grid-cols-[minmax(0,1fr)_440px]' : 'grid-cols-1'
         }`}
       >
-        <div className="space-y-6">
+        <div className="min-w-0 space-y-6">
           {(zoneFilter === 'todas' || zoneFilter === 'mesas') && (
             <section aria-label="Mesas" className="space-y-3">
               <h2 className="text-base font-extrabold text-[#0F2A36] flex items-center gap-2">
                 <UtensilsCrossed className="h-4 w-4 text-[#0E7490]" aria-hidden="true" />
                 <span>Mesas ({mesas.length})</span>
               </h2>
-              <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-3">
+              <div
+                className={`grid gap-3 ${
+                  selectedLocation
+                    ? 'grid-cols-2 sm:grid-cols-3 xl:grid-cols-3 2xl:grid-cols-4'
+                    : 'grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5'
+                }`}
+              >
                 {mesas.map(renderLocationCard)}
               </div>
             </section>
@@ -354,7 +360,13 @@ export function CajaFloorView() {
                 <Umbrella className="h-4 w-4 text-[#0E7490]" aria-hidden="true" />
                 <span>Toldos Playa ({toldos.length})</span>
               </h2>
-              <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-3">
+              <div
+                className={`grid gap-3 ${
+                  selectedLocation
+                    ? 'grid-cols-2 sm:grid-cols-3 xl:grid-cols-3 2xl:grid-cols-4'
+                    : 'grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5'
+                }`}
+              >
                 {toldos.map(renderLocationCard)}
               </div>
             </section>
