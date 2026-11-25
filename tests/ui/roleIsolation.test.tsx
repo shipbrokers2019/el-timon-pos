@@ -304,9 +304,12 @@ describe('Role Isolation & Core Tablet Flows (Mesonero & Cocina)', () => {
     expect(within(dialog).getByText(/Toldo 14/i)).toBeInTheDocument();
     expect(within(dialog).getByText(/Hamburguesa Playera/i)).toBeInTheDocument();
     expect(within(dialog).getByText(/Cerveza Polar Pilsen/i)).toBeInTheDocument();
-    // 2 * $8.50 + 2 * $2.50 = $22.00; at 52.5 = Bs 1155.00
+    // 2 * $8.50 + 2 * $2.50 = Subtotal $22.00 + IVA 16% ($3.52) = Total $25.52 / Bs 1339.80
     expect(within(dialog).getByText('$22.00')).toBeInTheDocument();
-    expect(within(dialog).getByText(/Bs\s*1155\.00/i)).toBeInTheDocument();
+    expect(within(dialog).getByText(/IVA \(16%\)/i)).toBeInTheDocument();
+    expect(within(dialog).getByText('$3.52')).toBeInTheDocument();
+    expect(within(dialog).getByText('$25.52')).toBeInTheDocument();
+    expect(within(dialog).getByText(/Bs\s*1339\.80/i)).toBeInTheDocument();
     expect(within(dialog).getByText(/Documento informativo no fiscal/i)).toBeInTheDocument();
 
     await user.click(within(dialog).getByRole('button', { name: 'Cerrar' }));

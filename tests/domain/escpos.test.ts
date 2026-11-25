@@ -142,8 +142,13 @@ describe('formatTicketText', () => {
     assertMaxLineWidth48(text);
     expect(text).toContain('Ceviche Mixto');
     expect(text).not.toContain('Langosta Anulada');
+    // Subtotal $24.00 + IVA 16% ($3.84) = Total $27.84 / Bs 1252.80 at 45.00 Bs/$
+    expect(text).toContain('Subtotal');
     expect(text).toContain('24.00');
-    expect(text).toContain('1080.00');
+    expect(text).toContain('IVA (16%)');
+    expect(text).toContain('3.84');
+    expect(text).toContain('27.84');
+    expect(text).toContain('1252.80');
     expect(text).toContain('45.00');
     expect(text).toContain('DOCUMENTO NO FISCAL');
   });

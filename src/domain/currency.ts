@@ -91,7 +91,19 @@ export function createPaymentEntry(params: {
   return entry;
 }
 
-export function calculateOrderTotalUsd(items: OrderItem[]): number {
+export const DEFAULT_IVA_RATE = 0.16;
+
+export interface OrderBreakdown {
+  subtotalUsd: number;
+  subtotalBs: number;
+  ivaRate: number;
+  ivaUsd: number;
+  ivaBs: number;
+  totalUsd: number;
+  totalBs: number;
+}
+
+export function calculateOrderSubtotalUsd(items: OrderItem[]): number {
   const sum = items.reduce((acc, item) => {
     if (item.voided === true) {
       return acc;
@@ -100,6 +112,39 @@ export function calculateOrderTotalUsd(items: OrderItem[]): number {
   }, 0);
 
   return roundMoney(sum);
+}
+
+export function calculateOrderBreakdown(
+  items: OrderItem[],
+  rate: number,
+  ivaRate = DEFAULT_IVA_RATE,
+): OrderBreakdown {
+  assertValidRate(rate);
+  const subtotalUsd = calculateOrderSubtotalUsd(items);
+  const ivaUsd = roundMoney(subtotalUsd * ivaRate);
+  const totalUsd = roundMoney(subtotalUsd + ivaUsd);
+  const subtotalBs = usdToBs(subtotalUsd, rate);
+  const totalBs = usdToBs(totalUsd, rate);
+  const ivaBs = roundMoney(totalBs - subtotalBs);
+
+  return {
+    subtotalUsd,
+    subtotalBs,
+    ivaRate,
+    ivaUsd,
+    ivaBs,
+    totalUsd,
+    totalBs,
+  };
+}
+
+export function calculateOrderTotalUsd(
+  items: OrderItem[],
+  ivaRate = DEFAULT_IVA_RATE,
+): number {
+  const subtotalUsd = calculateOrderSubtotalUsd(items);
+  const ivaUsd = roundMoney(subtotalUsd * ivaRate);
+  return roundMoney(subtotalUsd + ivaUsd);
 }
 
 export interface PaymentSummary {

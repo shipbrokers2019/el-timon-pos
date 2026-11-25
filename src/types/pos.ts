@@ -117,6 +117,11 @@ export interface PreFacturaSnapshot {
     unitPriceUsd: number;
     subtotalUsd: number;
   }>;
+  subtotalUsd: number;
+  subtotalBs: number;
+  ivaRate: number;
+  ivaUsd: number;
+  ivaBs: number;
   totalUsd: number;
   totalBs: number;
   exchangeRate: number;
@@ -133,6 +138,10 @@ export interface Order {
   shiftId: string;
   status: 'abierta' | 'cerrada';
   items: OrderItem[];
+  subtotalUsd?: number;
+  ivaRate?: number;
+  ivaUsd?: number;
+  ivaBs?: number;
   totalUsd: number;
   totalBs: number;
   exchangeRate: number;

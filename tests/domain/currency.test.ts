@@ -1,6 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import {
+  DEFAULT_IVA_RATE,
   bsToUsd,
+  calculateOrderBreakdown,
+  calculateOrderSubtotalUsd,
   calculateOrderTotalUsd,
   calculatePaymentSummary,
   createPaymentEntry,
@@ -153,7 +156,42 @@ describe('calculateOrderTotalUsd', () => {
       },
     ];
 
-    expect(calculateOrderTotalUsd(items)).toBe(44.5);
+    expect(DEFAULT_IVA_RATE).toBe(0.16);
+    expect(calculateOrderSubtotalUsd(items)).toBe(44.5);
+    expect(calculateOrderTotalUsd(items)).toBe(51.62);
+
+    const breakdown = calculateOrderBreakdown(items, 50);
+    expect(breakdown).toEqual({
+      subtotalUsd: 44.5,
+      subtotalBs: 2225,
+      ivaRate: 0.16,
+      ivaUsd: 7.12,
+      ivaBs: 356,
+      totalUsd: 51.62,
+      totalBs: 2581,
+    });
+  });
+
+  it('adds 16% IVA on top of a $10.00 product ($10.00 + $1.60 = $11.60)', () => {
+    const items: OrderItem[] = [
+      {
+        id: 'oi-10',
+        menuItemId: 'm-10',
+        name: 'Plato de Prueba',
+        quantity: 1,
+        unitPriceUsd: 10,
+        notes: '',
+        sendsToKitchen: true,
+        comandaId: 'c-10',
+      },
+    ];
+    const breakdown = calculateOrderBreakdown(items, 50);
+    expect(breakdown.subtotalUsd).toBe(10);
+    expect(breakdown.ivaUsd).toBe(1.6);
+    expect(breakdown.totalUsd).toBe(11.6);
+    expect(breakdown.subtotalBs).toBe(500);
+    expect(breakdown.ivaBs).toBe(80);
+    expect(breakdown.totalBs).toBe(580);
   });
 
   it('returns 0 when empty or all items are voided', () => {

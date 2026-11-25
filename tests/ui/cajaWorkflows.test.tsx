@@ -64,14 +64,16 @@ describe('Caja / Admin Complete Suite & App Wiring', () => {
 
     // Open Mesa 1 account detail (regex avoids matching Mesa 10)
     const mesa1Tile = await screen.findByRole('button', { name: /^Mesa 1\b/i });
-    expect(within(mesa1Tile).getByText(/\$11\.00/)).toBeInTheDocument();
+    expect(within(mesa1Tile).getByText(/\$12\.76/)).toBeInTheDocument();
     await user.click(mesa1Tile);
 
     // Open CheckoutModal
     await user.click(await screen.findByRole('button', { name: /Cobrar y Cerrar Cuenta/i }));
     const dialog = await screen.findByRole('dialog');
     expect(within(dialog).getAllByText(/\$11\.00/).length).toBeGreaterThan(0);
-    expect(within(dialog).getAllByText(/Bs\s*577\.50/).length).toBeGreaterThan(0);
+    expect(within(dialog).getAllByText(/\$1\.76/).length).toBeGreaterThan(0);
+    expect(within(dialog).getAllByText(/\$12\.76/).length).toBeGreaterThan(0);
+    expect(within(dialog).getAllByText(/Bs\s*669\.90/).length).toBeGreaterThan(0);
 
     // Confirm button disabled before payment settles
     const confirmBtn = within(dialog).getByRole('button', {
@@ -86,8 +88,8 @@ describe('Caja / Admin Complete Suite & App Wiring', () => {
     await user.type(amountInput, '6');
     await user.click(within(dialog).getByRole('button', { name: /Agregar pago/i }));
 
-    // Remaining should be $5.00 / Bs 262.50
-    expect(within(dialog).getAllByText(/\$5\.00/).length).toBeGreaterThan(0);
+    // Subtotal $11.00 + IVA 16% ($1.76) = $12.76; after $6.00 Zelle remaining is $6.76 / Bs 354.90
+    expect(within(dialog).getAllByText(/\$6\.76/).length).toBeGreaterThan(0);
 
     // Select Débito / Punto de venta and use "Pagar restante"
     await user.click(
@@ -118,8 +120,8 @@ describe('Caja / Admin Complete Suite & App Wiring', () => {
 
     const debitoRow = screen.getByText(/Débito \/ Punto de venta/i).closest('tr');
     expect(debitoRow).not.toBeNull();
-    expect(within(debitoRow!).getByText(/\$5\.00/)).toBeInTheDocument();
-    expect(within(debitoRow!).getByText(/Bs\s*262\.50/)).toBeInTheDocument();
+    expect(within(debitoRow!).getByText(/\$6\.76/)).toBeInTheDocument();
+    expect(within(debitoRow!).getByText(/Bs\s*354\.90/)).toBeInTheDocument();
   });
 
   it('3. Inventario y Recetas displays deducted Carne molida stock (4.8 kg) and allows registering a restock entry', async () => {
@@ -179,9 +181,9 @@ describe('Caja / Admin Complete Suite & App Wiring', () => {
         id: 'pay-1',
         method: 'zelle',
         currency: 'USD',
-        amountNative: 17,
-        amountUsd: 17,
-        amountBs: 892.5,
+        amountNative: 19.72,
+        amountUsd: 19.72,
+        amountBs: 1035.3,
         exchangeRate: 52.5,
         paidAt: new Date().toISOString(),
       },
@@ -198,9 +200,9 @@ describe('Caja / Admin Complete Suite & App Wiring', () => {
         id: 'pay-2',
         method: 'efectivo_usd',
         currency: 'USD',
-        amountNative: 11,
-        amountUsd: 11,
-        amountBs: 577.5,
+        amountNative: 12.76,
+        amountUsd: 12.76,
+        amountBs: 669.9,
         exchangeRate: 52.5,
         paidAt: new Date().toISOString(),
       },
@@ -218,8 +220,8 @@ describe('Caja / Admin Complete Suite & App Wiring', () => {
       .getByRole('heading', { name: /Mesas vs\. Toldos en la playa/i })
       .closest('section');
     expect(zoneSection).not.toBeNull();
-    expect(within(zoneSection!).getAllByText(/\$17\.00/).length).toBeGreaterThan(0);
-    expect(within(zoneSection!).getAllByText(/\$11\.00/).length).toBeGreaterThan(0);
+    expect(within(zoneSection!).getAllByText(/\$19\.72/).length).toBeGreaterThan(0);
+    expect(within(zoneSection!).getAllByText(/\$12\.76/).length).toBeGreaterThan(0);
   });
 
   it('5. Updating daily exchange rate in Configuración updates displayed rate without altering already-closed orders', async () => {
@@ -237,9 +239,9 @@ describe('Caja / Admin Complete Suite & App Wiring', () => {
         id: 'pay-closed',
         method: 'efectivo_usd',
         currency: 'USD',
-        amountNative: 11,
-        amountUsd: 11,
-        amountBs: 577.5,
+        amountNative: 12.76,
+        amountUsd: 12.76,
+        amountBs: 669.9,
         exchangeRate: 52.5,
         paidAt: new Date().toISOString(),
       },
@@ -262,7 +264,7 @@ describe('Caja / Admin Complete Suite & App Wiring', () => {
 
     const storedClosed = repo.getState().orders.find((o) => o.id === closedBefore.id);
     expect(storedClosed?.exchangeRate).toBe(52.5);
-    expect(storedClosed?.totalBs).toBe(577.5);
+    expect(storedClosed?.totalBs).toBe(669.9);
   });
 
   it('6. Caja can print Pre-cuenta 80mm, close preview with Escape, and void an item returning stock to inventory', async () => {

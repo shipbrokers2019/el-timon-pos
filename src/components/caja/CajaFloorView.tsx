@@ -11,7 +11,7 @@ import {
   UtensilsCrossed,
   X,
 } from 'lucide-react';
-import { calculateOrderTotalUsd, usdToBs } from '../../domain/currency';
+import { calculateOrderBreakdown, calculateOrderTotalUsd, usdToBs } from '../../domain/currency';
 import { usePos } from '../../store/PosProvider';
 import type { Location, Order, VoidDisposition } from '../../types/pos';
 import { getElapsedMinutes } from '../timeUtils';
@@ -425,27 +425,36 @@ export function CajaFloorView() {
             <div className="p-4 space-y-4">
               {selectedOrder ? (
                 <>
-                  {/* Running Totals */}
-                  <div className="p-4 rounded-xl bg-[#FAF8F4] border border-[#E5DFD3] flex items-center justify-between gap-3">
-                    <div>
-                      <p className="text-xs font-semibold text-[#0F2A36]/70">
-                        Total cuenta · {selectedOrder.waiterName}
-                      </p>
-                      <p className="text-2xl font-extrabold text-[#0F2A36] tabular-nums">
-                        ${calculateOrderTotalUsd(selectedOrder.items).toFixed(2)}
-                      </p>
-                    </div>
-                    <div className="text-right">
-                      <p className="text-xs font-semibold text-[#0F2A36]/70">En Bolívares</p>
-                      <p className="text-lg font-extrabold text-[#0E7490] tabular-nums">
-                        Bs{' '}
-                        {usdToBs(
-                          calculateOrderTotalUsd(selectedOrder.items),
-                          rate,
-                        ).toFixed(2)}
-                      </p>
-                    </div>
-                  </div>
+                  {/* Running Totals with 16% IVA Breakdown */}
+                  {(() => {
+                    const bd = calculateOrderBreakdown(selectedOrder.items, rate);
+                    return (
+                      <div className="p-4 rounded-xl bg-[#FAF8F4] border border-[#E5DFD3] space-y-2">
+                        <div className="flex items-center justify-between text-xs font-semibold text-[#0F2A36]/75 tabular-nums">
+                          <span>Subtotal productos · {selectedOrder.waiterName}</span>
+                          <span>${bd.subtotalUsd.toFixed(2)}</span>
+                        </div>
+                        <div className="flex items-center justify-between text-xs font-semibold text-[#0F2A36]/75 tabular-nums">
+                          <span>IVA ({Math.round(bd.ivaRate * 100)}%)</span>
+                          <span>${bd.ivaUsd.toFixed(2)}</span>
+                        </div>
+                        <div className="pt-2 border-t border-[#E5DFD3] flex items-center justify-between gap-3">
+                          <div>
+                            <p className="text-xs font-bold text-[#0F2A36]/80">Total a cobrar USD</p>
+                            <p className="text-2xl font-extrabold text-[#0F2A36] tabular-nums">
+                              ${bd.totalUsd.toFixed(2)}
+                            </p>
+                          </div>
+                          <div className="text-right">
+                            <p className="text-xs font-bold text-[#0F2A36]/80">En Bolívares</p>
+                            <p className="text-lg font-extrabold text-[#0E7490] tabular-nums">
+                              Bs {bd.totalBs.toFixed(2)}
+                            </p>
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })()}
 
                   {/* Primary Actions */}
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">

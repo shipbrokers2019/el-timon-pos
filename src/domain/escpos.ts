@@ -1,5 +1,5 @@
 import type { Comanda, Order, OrderItem, PaymentMethod, Shift } from '../types/pos';
-import { calculateOrderTotalUsd, roundMoney, usdToBs } from './currency';
+import { calculateOrderBreakdown, roundMoney } from './currency';
 
 export type TicketPayload =
   | { type: 'comanda'; restaurantName: string; comanda: Comanda }
@@ -215,8 +215,8 @@ function buildTicketSections(payload: TicketPayload): TicketSections {
     case 'precuenta': {
       const { order, exchangeRate, restaurantName, timestampIso } = payload;
       const activeItems = order.items.filter((item) => item.voided !== true);
-      const totalUsd = calculateOrderTotalUsd(activeItems);
-      const totalBs = usdToBs(totalUsd, exchangeRate);
+      const breakdown = calculateOrderBreakdown(activeItems, exchangeRate);
+      const ivaPct = Math.round(breakdown.ivaRate * 100);
 
       const headerLines = [
         ...centerText(restaurantName.toUpperCase()),
@@ -237,9 +237,12 @@ function buildTicketSections(payload: TicketPayload): TicketSections {
 
       bodyLines.push(
         DIVIDER_LINE,
-        formatColumns('TOTAL USD:', `$${totalUsd.toFixed(2)}`),
-        formatColumns('TOTAL Bs:', `Bs ${totalBs.toFixed(2)}`),
-        formatColumns('Tasa:', `${exchangeRate.toFixed(2)} Bs/$`),
+        formatColumns('Subtotal Productos:', `$${breakdown.subtotalUsd.toFixed(2)}`),
+        formatColumns(`IVA (${ivaPct}%):`, `$${breakdown.ivaUsd.toFixed(2)}`),
+        DIVIDER_LINE,
+        formatColumns('TOTAL A COBRAR USD:', `$${breakdown.totalUsd.toFixed(2)}`),
+        formatColumns('TOTAL A COBRAR Bs:', `Bs ${breakdown.totalBs.toFixed(2)}`),
+        formatColumns('Tasa BCV:', `${exchangeRate.toFixed(2)} Bs/$`),
         DOUBLE_DIVIDER_LINE,
         ...centerText('DOCUMENTO NO FISCAL'),
       );

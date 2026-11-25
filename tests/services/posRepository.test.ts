@@ -105,7 +105,9 @@ describe('seedData & LocalPosRepository', () => {
     expect(result.comanda).toBeNull();
     expect(result.printJob).toBeNull();
     expect(result.order.items).toHaveLength(2);
-    expect(result.order.totalUsd).toBe(25);
+    expect(result.order.subtotalUsd).toBe(25);
+    expect(result.order.ivaUsd).toBe(4);
+    expect(result.order.totalUsd).toBe(29);
 
     const state = repo.getState();
     expect(state.comandas).toHaveLength(0);
@@ -154,7 +156,10 @@ describe('seedData & LocalPosRepository', () => {
       carneAfterOrder + 0.4,
     );
     const updatedOrder1 = afterRestock.orders.find((o) => o.id === order.id)!;
-    expect(updatedOrder1.totalUsd).toBe(14);
+    // 1x Pescado Frito ($14.00) + 16% IVA ($2.24) = $16.24
+    expect(updatedOrder1.subtotalUsd).toBe(14);
+    expect(updatedOrder1.ivaUsd).toBe(2.24);
+    expect(updatedOrder1.totalUsd).toBe(16.24);
 
     const voidComandas = afterRestock.comandas.filter((c) => c.isVoidAlert === true);
     expect(voidComandas).toHaveLength(1);
@@ -221,7 +226,7 @@ describe('seedData & LocalPosRepository', () => {
       createPaymentEntry({
         id: 'pay-2',
         method: 'efectivo_bs',
-        amountNative: 630, // 630 / 52.5 = $12.00
+        amountNative: 814.8, // 814.80 / 52.5 = $15.52 (+ $10 Zelle = $25.52 = $22 + 16% IVA)
         exchangeRate: rateAtSale,
         paidAt: '2026-11-25T15:00:00Z',
       }),
@@ -230,8 +235,10 @@ describe('seedData & LocalPosRepository', () => {
     const settled = await repo.settleOrder(order.id, payments);
     expect(settled.status).toBe('cerrada');
     expect(settled.exchangeRate).toBe(52.5);
-    expect(settled.totalUsd).toBe(22);
-    expect(settled.totalBs).toBe(1155);
+    expect(settled.subtotalUsd).toBe(22);
+    expect(settled.ivaUsd).toBe(3.52);
+    expect(settled.totalUsd).toBe(25.52);
+    expect(settled.totalBs).toBe(1339.8);
 
     const freedLocation = repo.getState().locations.find((l) => l.id === 'mesa-4')!;
     expect(freedLocation.status).toBe('libre');
@@ -244,15 +251,15 @@ describe('seedData & LocalPosRepository', () => {
       .getState()
       .orders.find((o) => o.id === order.id)!;
     expect(closedOrderAfterRateChange.exchangeRate).toBe(52.5);
-    expect(closedOrderAfterRateChange.totalBs).toBe(1155);
+    expect(closedOrderAfterRateChange.totalBs).toBe(1339.8);
 
     const { shift, printJob } = await repo.closeShift('user-admin', 'Turno sin novedad');
     expect(shift.status).toBe('cerrado');
     expect(shift.ordersCount).toBe(1);
-    expect(shift.totalSalesUsd).toBe(22);
-    expect(shift.totalSalesBs).toBe(1155);
+    expect(shift.totalSalesUsd).toBe(25.52);
+    expect(shift.totalSalesBs).toBe(1339.8);
     expect(shift.totalsByMethod.zelle.totalUsd).toBe(10);
-    expect(shift.totalsByMethod.efectivo_bs.totalBs).toBe(630);
+    expect(shift.totalsByMethod.efectivo_bs.totalBs).toBe(814.8);
     expect(printJob.type).toBe('cierre');
   });
 
@@ -276,7 +283,7 @@ describe('seedData & LocalPosRepository', () => {
       createPaymentEntry({
         id: 'pay-replay',
         method: 'efectivo_usd',
-        amountNative: 8.5,
+        amountNative: 9.86, // $8.50 + 16% IVA ($1.36)
         exchangeRate: 52.5,
         paidAt: '2026-11-25T16:00:00Z',
       }),

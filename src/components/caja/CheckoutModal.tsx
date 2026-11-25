@@ -11,7 +11,7 @@ import {
 } from 'lucide-react';
 import {
   bsToUsd,
-  calculateOrderTotalUsd,
+  calculateOrderBreakdown,
   calculatePaymentSummary,
   createPaymentEntry,
   getMethodCurrency,
@@ -75,7 +75,11 @@ function renderMethodIcon(method: PaymentMethod) {
 export function CheckoutModal({ order, onClose, onSettled }: CheckoutModalProps) {
   const { state, settleOrder } = usePos();
   const rate = state.settings.exchangeRate;
-  const totalUsd = useMemo(() => calculateOrderTotalUsd(order.items), [order.items]);
+  const breakdown = useMemo(
+    () => calculateOrderBreakdown(order.items, rate),
+    [order.items, rate],
+  );
+  const totalUsd = breakdown.totalUsd;
 
   const [selectedMethod, setSelectedMethod] = useState<PaymentMethod>('zelle');
   const [amountInput, setAmountInput] = useState<string>('');
@@ -193,7 +197,7 @@ export function CheckoutModal({ order, onClose, onSettled }: CheckoutModalProps)
               Cobrar y cerrar · {order.locationLabel}
             </h2>
             <p className="text-xs font-medium text-[#0F2A36]/70 tabular-nums">
-              Tasa del día: 1 USD = {rate.toFixed(2)} Bs · Precios finales todo incluido
+              Tasa BCV: 1 USD = {rate.toFixed(2)} Bs · Incluye IVA (16%)
             </p>
           </div>
           <button
@@ -209,19 +213,31 @@ export function CheckoutModal({ order, onClose, onSettled }: CheckoutModalProps)
 
         {/* Body */}
         <div className="p-5 overflow-y-auto space-y-5">
-          {/* Total Summary */}
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 bg-white border border-[#E5DFD3] rounded-2xl p-4">
-            <div>
-              <p className="text-xs font-semibold text-[#0F2A36]/70">Total final USD</p>
-              <p className="text-3xl font-extrabold text-[#0F2A36] tabular-nums">
-                ${summary.totalUsd.toFixed(2)}
-              </p>
+          {/* Total Summary with Subtotal + IVA 16% */}
+          <div className="bg-white border border-[#E5DFD3] rounded-2xl p-4 space-y-3">
+            <div className="grid grid-cols-2 gap-2 text-xs font-semibold text-[#0F2A36]/75 tabular-nums pb-2.5 border-b border-[#E5DFD3]">
+              <div>
+                <span>Subtotal productos: </span>
+                <strong className="text-[#0F2A36]">${breakdown.subtotalUsd.toFixed(2)}</strong>
+              </div>
+              <div className="text-right">
+                <span>IVA ({Math.round(breakdown.ivaRate * 100)}%): </span>
+                <strong className="text-[#0F2A36]">${breakdown.ivaUsd.toFixed(2)}</strong>
+              </div>
             </div>
-            <div className="sm:text-right">
-              <p className="text-xs font-semibold text-[#0F2A36]/70">Total final en Bolívares</p>
-              <p className="text-2xl font-extrabold text-[#0E7490] tabular-nums">
-                Bs {summary.totalBs.toFixed(2)}
-              </p>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div>
+                <p className="text-xs font-semibold text-[#0F2A36]/70">Total a cobrar USD</p>
+                <p className="text-3xl font-extrabold text-[#0F2A36] tabular-nums">
+                  ${summary.totalUsd.toFixed(2)}
+                </p>
+              </div>
+              <div className="sm:text-right">
+                <p className="text-xs font-semibold text-[#0F2A36]/70">Total a cobrar en Bolívares</p>
+                <p className="text-2xl font-extrabold text-[#0E7490] tabular-nums">
+                  Bs {summary.totalBs.toFixed(2)}
+                </p>
+              </div>
             </div>
           </div>
 

@@ -1,9 +1,8 @@
 import {
-  calculateOrderTotalUsd,
+  calculateOrderBreakdown,
   calculatePaymentSummary,
   roundMoney,
   summarizePaymentsByMethod,
-  usdToBs,
 } from '../domain/currency';
 import { formatTicketText, type TicketPayload } from '../domain/escpos';
 import {
@@ -368,16 +367,22 @@ export class LocalPosRepository implements PosRepository {
     });
 
     const updatedOrderItems = [...order.items, ...newOrderItems];
-    const totalUsd = calculateOrderTotalUsd(updatedOrderItems);
-    const totalBs = usdToBs(totalUsd, this.state.settings.exchangeRate);
+    const breakdown = calculateOrderBreakdown(
+      updatedOrderItems,
+      this.state.settings.exchangeRate,
+    );
 
     const updatedOrder: Order = {
       ...order,
       waiterId: input.waiterId,
       waiterName: input.waiterName,
       items: updatedOrderItems,
-      totalUsd,
-      totalBs,
+      subtotalUsd: breakdown.subtotalUsd,
+      ivaRate: breakdown.ivaRate,
+      ivaUsd: breakdown.ivaUsd,
+      ivaBs: breakdown.ivaBs,
+      totalUsd: breakdown.totalUsd,
+      totalBs: breakdown.totalBs,
       exchangeRate: this.state.settings.exchangeRate,
     };
 
@@ -619,14 +624,20 @@ export class LocalPosRepository implements PosRepository {
     const updatedItems = order.items.map((item) =>
       item.id === itemId ? voidedItem : item,
     );
-    const totalUsd = calculateOrderTotalUsd(updatedItems);
-    const totalBs = usdToBs(totalUsd, this.state.settings.exchangeRate);
+    const breakdown = calculateOrderBreakdown(
+      updatedItems,
+      this.state.settings.exchangeRate,
+    );
 
     const updatedOrder: Order = {
       ...order,
       items: updatedItems,
-      totalUsd,
-      totalBs,
+      subtotalUsd: breakdown.subtotalUsd,
+      ivaRate: breakdown.ivaRate,
+      ivaUsd: breakdown.ivaUsd,
+      ivaBs: breakdown.ivaBs,
+      totalUsd: breakdown.totalUsd,
+      totalBs: breakdown.totalBs,
       exchangeRate: this.state.settings.exchangeRate,
     };
 
@@ -713,8 +724,8 @@ export class LocalPosRepository implements PosRepository {
     }
 
     const rate = this.state.settings.exchangeRate;
-    const totalUsd = calculateOrderTotalUsd(order.items);
-    const summary = calculatePaymentSummary(totalUsd, payments, rate);
+    const breakdown = calculateOrderBreakdown(order.items, rate);
+    const summary = calculatePaymentSummary(breakdown.totalUsd, payments, rate);
     if (!summary.isSettled) {
       throw new Error(
         `Pago insuficiente: faltan $${summary.remainingUsd.toFixed(2)} para cerrar la cuenta`,
@@ -722,7 +733,6 @@ export class LocalPosRepository implements PosRepository {
     }
 
     const nowIso = new Date().toISOString();
-    const totalBs = usdToBs(totalUsd, rate);
     const activeShift = this.state.shifts.find((s) => s.status === 'abierto');
     const resolvedShiftId = order.shiftId || activeShift?.id || '';
 
@@ -730,8 +740,12 @@ export class LocalPosRepository implements PosRepository {
       ...order,
       shiftId: resolvedShiftId,
       status: 'cerrada',
-      totalUsd,
-      totalBs,
+      subtotalUsd: breakdown.subtotalUsd,
+      ivaRate: breakdown.ivaRate,
+      ivaUsd: breakdown.ivaUsd,
+      ivaBs: breakdown.ivaBs,
+      totalUsd: breakdown.totalUsd,
+      totalBs: breakdown.totalBs,
       exchangeRate: rate,
       payments: payments.map((payment) => ({ ...payment })),
       closedAt: nowIso,
@@ -985,10 +999,16 @@ export class LocalPosRepository implements PosRepository {
       if (order.status === 'cerrada') {
         return order;
       }
+      const breakdown = calculateOrderBreakdown(order.items, rate);
       return {
         ...order,
         exchangeRate: rate,
-        totalBs: usdToBs(order.totalUsd, rate),
+        subtotalUsd: breakdown.subtotalUsd,
+        ivaRate: breakdown.ivaRate,
+        ivaUsd: breakdown.ivaUsd,
+        ivaBs: breakdown.ivaBs,
+        totalUsd: breakdown.totalUsd,
+        totalBs: breakdown.totalBs,
       };
     });
 
@@ -1047,8 +1067,7 @@ export class LocalPosRepository implements PosRepository {
       order.status === 'cerrada'
         ? order.exchangeRate
         : this.state.settings.exchangeRate;
-    const totalUsd = calculateOrderTotalUsd(order.items);
-    const totalBs = usdToBs(totalUsd, rate);
+    const breakdown = calculateOrderBreakdown(order.items, rate);
     const activeItems = order.items
       .filter((item) => !item.voided)
       .map((item) => ({
@@ -1066,8 +1085,13 @@ export class LocalPosRepository implements PosRepository {
       locationLabel: order.locationLabel,
       restaurantName: this.state.settings.printer.restaurantName,
       items: activeItems,
-      totalUsd,
-      totalBs,
+      subtotalUsd: breakdown.subtotalUsd,
+      subtotalBs: breakdown.subtotalBs,
+      ivaRate: breakdown.ivaRate,
+      ivaUsd: breakdown.ivaUsd,
+      ivaBs: breakdown.ivaBs,
+      totalUsd: breakdown.totalUsd,
+      totalBs: breakdown.totalBs,
       exchangeRate: rate,
       generatedAt: nowIso,
     };

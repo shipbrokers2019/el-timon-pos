@@ -93,16 +93,46 @@ export function CustomerPreFacturaModal({
             </table>
           </div>
 
-          {/* Grand Totals */}
+          {/* Grand Totals Breakdown (Productos + IVA 16% = Total a cobrar) */}
           <div className="p-5 rounded-2xl bg-[#F2EDE4] border border-[#0F2A36]/15 space-y-2.5">
-            <div className="flex items-baseline justify-between gap-2">
-              <span className="text-sm font-bold text-[#0F2A36]/80">Total a pagar (USD)</span>
+            <div className="flex items-baseline justify-between gap-2 text-sm">
+              <span className="font-semibold text-[#0F2A36]/75">Subtotal productos</span>
+              <div className="text-right tabular-nums">
+                <span className="font-bold text-[#0F2A36]">
+                  ${(preFactura.subtotalUsd ?? preFactura.totalUsd).toFixed(2)}
+                </span>
+                {preFactura.subtotalBs !== undefined && (
+                  <span className="ml-2 text-xs font-semibold text-[#0F2A36]/65">
+                    (Bs {preFactura.subtotalBs.toFixed(2)})
+                  </span>
+                )}
+              </div>
+            </div>
+
+            <div className="flex items-baseline justify-between gap-2 text-sm">
+              <span className="font-semibold text-[#0F2A36]/75">
+                IVA ({Math.round((preFactura.ivaRate ?? 0.16) * 100)}%)
+              </span>
+              <div className="text-right tabular-nums">
+                <span className="font-bold text-[#0F2A36]">
+                  ${(preFactura.ivaUsd ?? 0).toFixed(2)}
+                </span>
+                {preFactura.ivaBs !== undefined && (
+                  <span className="ml-2 text-xs font-semibold text-[#0F2A36]/65">
+                    (Bs {preFactura.ivaBs.toFixed(2)})
+                  </span>
+                )}
+              </div>
+            </div>
+
+            <div className="pt-2.5 border-t border-[#0F2A36]/15 flex items-baseline justify-between gap-2">
+              <span className="text-sm font-extrabold text-[#0F2A36]">Total a cobrar (USD)</span>
               <span className="text-3xl font-extrabold text-[#0F2A36] tabular-nums">
                 ${preFactura.totalUsd.toFixed(2)}
               </span>
             </div>
             <div className="pt-2 border-t border-[#0F2A36]/15 flex items-baseline justify-between gap-2">
-              <span className="text-sm font-bold text-[#0F2A36]/80">Total en Bolívares</span>
+              <span className="text-sm font-bold text-[#0F2A36]/80">Total a cobrar (Bs)</span>
               <span className="text-xl font-extrabold text-[#0E7490] tabular-nums">
                 Bs {preFactura.totalBs.toFixed(2)}
               </span>
