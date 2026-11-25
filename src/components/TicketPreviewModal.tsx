@@ -1,3 +1,4 @@
+import { useEffect } from 'react';
 import { Printer, X } from 'lucide-react';
 import { usePos } from '../store/PosProvider';
 import type { PrintJob, PrintStatus } from '../types/pos';
@@ -19,6 +20,20 @@ export function TicketPreviewModal({ job, onClose }: TicketPreviewModalProps) {
   const { activeTicketPreview, dismissTicketPreview } = usePos();
   const resolvedJob = job !== undefined ? job : activeTicketPreview;
   const handleClose = onClose ?? dismissTicketPreview;
+
+  useEffect(() => {
+    if (!resolvedJob) {
+      return;
+    }
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        handleClose();
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [resolvedJob, handleClose]);
 
   if (!resolvedJob) {
     return null;

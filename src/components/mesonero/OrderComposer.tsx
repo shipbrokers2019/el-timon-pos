@@ -345,7 +345,7 @@ export function OrderComposer({ location, onClose }: OrderComposerProps) {
                     aria-label={`Nota para ${entry.name}`}
                     onChange={(e) => handleNoteChange(entry.menuItemId, e.target.value)}
                     placeholder="Nota para cocina (ej. Sin cebolla, bien fría)"
-                    className="w-full min-h-10 px-3 rounded-lg bg-white border border-[#0F2A36]/20 text-xs font-medium text-[#0F2A36] placeholder:text-[#0F2A36]/50 focus:outline-2 focus:outline-[#0E7490]"
+                    className="w-full min-h-12 px-3 rounded-lg bg-white border border-[#0F2A36]/20 text-xs font-medium text-[#0F2A36] placeholder:text-[#0F2A36]/50 focus:outline-2 focus:outline-[#0E7490]"
                   />
                 </li>
               ))}

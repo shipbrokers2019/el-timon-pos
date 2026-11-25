@@ -33,22 +33,16 @@ export function PinLoginScreen() {
     [loginWithPin],
   );
 
-  const handleDigit = useCallback(
-    (digit: string) => {
-      setError(null);
-      setPin((prev) => {
-        if (prev.length >= 4) {
-          return prev;
-        }
-        const next = `${prev}${digit}`;
-        if (next.length === 4) {
-          queueMicrotask(() => attemptLogin(next));
-        }
-        return next;
-      });
-    },
-    [attemptLogin],
-  );
+  const handleDigit = useCallback((digit: string) => {
+    setError(null);
+    setPin((prev) => (prev.length >= 4 ? prev : `${prev}${digit}`));
+  }, []);
+
+  useEffect(() => {
+    if (pin.length === 4) {
+      attemptLogin(pin);
+    }
+  }, [pin, attemptLogin]);
 
   const handleBackspace = useCallback(() => {
     setError(null);
