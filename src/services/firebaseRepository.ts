@@ -17,6 +17,7 @@ import {
   writeBatch,
   type Firestore,
   type Unsubscribe,
+  type WriteBatch,
 } from 'firebase/firestore';
 import type {
   ComandaStatus,
@@ -122,6 +123,25 @@ export function getFirebaseEnvConfig(): FirebaseOptions | null {
 
 export function isFirebaseConfigured(): boolean {
   return getFirebaseEnvConfig() !== null;
+}
+
+function withTimeout<T>(operation: Promise<T>, ms: number, label: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(
+      () => reject(new Error(`Tiempo de espera agotado (${label})`)),
+      ms,
+    );
+    operation.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (err: unknown) => {
+        clearTimeout(timer);
+        reject(err);
+      },
+    );
+  });
 }
 
 export function initFirestoreClient(config: FirebaseOptions): Firestore {
@@ -354,11 +374,20 @@ export class FirebasePosRepository implements PosRepository {
     }, 3000);
   }
 
-  private applyRemoteComandas(remoteComandas: PosState['comandas']): void {
+  private applyRemoteComandas(
+    remoteComandas: PosState['comandas'],
+    skipIfEmpty = false,
+  ): void {
     const role = this.stationRole;
     const current = this.local.getState();
     const pendingLocal = current.comandas.filter((c) => c.pendingSync === true);
-    if (remoteComandas.length === 0 && pendingLocal.length === 0) return;
+    if (
+      remoteComandas.length === 0 &&
+      pendingLocal.length === 0 &&
+      (skipIfEmpty || current.comandas.length === 0)
+    ) {
+      return;
+    }
 
     const prevStatusById = new Map(current.comandas.map((c) => [c.id, c.status]));
     const newlyReadyLocationIds = new Set<string>();
@@ -397,13 +426,19 @@ export class FirebasePosRepository implements PosRepository {
     });
   }
 
-  private applyRemotePrintJobs(remoteJobs: PrintJob[]): void {
+  private applyRemotePrintJobs(remoteJobs: PrintJob[], skipIfEmpty = false): void {
     const current = this.local.getState();
     const pendingComandaIds = this.getPendingComandaIds(current);
     const pendingLocalJobs = current.printJobs.filter((job) =>
       pendingComandaIds.has(job.referenceId),
     );
-    if (remoteJobs.length === 0 && pendingLocalJobs.length === 0) return;
+    if (
+      remoteJobs.length === 0 &&
+      pendingLocalJobs.length === 0 &&
+      (skipIfEmpty || current.printJobs.length === 0)
+    ) {
+      return;
+    }
 
     const pendingJobMap = new Map(pendingLocalJobs.map((j) => [j.id, j]));
     const remoteIds = new Set(remoteJobs.map((j) => j.id));
@@ -489,7 +524,7 @@ export class FirebasePosRepository implements PosRepository {
               return;
             }
 
-            if (snap.empty && unsyncedLocal.length === 0) return;
+            if (snap.empty && snap.metadata.fromCache && unsyncedLocal.length === 0) return;
             const mergedOrders = [
               ...incoming.map((o) => unsyncedMap.get(o.id) ?? o),
               ...unsyncedLocal.filter((o) => !remoteIds.has(o.id)),
@@ -507,6 +542,7 @@ export class FirebasePosRepository implements PosRepository {
         (snap) => {
           this.applyRemoteComandas(
             snap.docs.map((d) => d.data() as PosState['comandas'][number]),
+            snap.metadata.fromCache,
           );
         },
         (err) => this.handleSnapshotError('comandas', err),
@@ -517,7 +553,10 @@ export class FirebasePosRepository implements PosRepository {
       onSnapshot(
         collection(this.db, 'printJobs'),
         (snap) => {
-          this.applyRemotePrintJobs(snap.docs.map((d) => d.data() as PrintJob));
+          this.applyRemotePrintJobs(
+            snap.docs.map((d) => d.data() as PrintJob),
+            snap.metadata.fromCache,
+          );
         },
         (err) => this.handleSnapshotError('printJobs', err),
       ),
@@ -654,8 +693,12 @@ export class FirebasePosRepository implements PosRepository {
       ]);
       this.applyRemoteComandas(
         comandasSnap.docs.map((d) => d.data() as PosState['comandas'][number]),
+        comandasSnap.metadata.fromCache,
       );
-      this.applyRemotePrintJobs(printJobsSnap.docs.map((d) => d.data() as PrintJob));
+      this.applyRemotePrintJobs(
+        printJobsSnap.docs.map((d) => d.data() as PrintJob),
+        printJobsSnap.metadata.fromCache,
+      );
 
       if (this.stationRole !== 'cocina') {
         const ordersQuery =
@@ -674,12 +717,21 @@ export class FirebasePosRepository implements PosRepository {
               current.locations,
             );
         const incomingOrders = ordersSnap.docs.map((d) => d.data() as Order);
-        if (incomingOrders.length > 0 || !locationsSnap.empty) {
+        const pendingComandaIds = this.getPendingComandaIds(current);
+        const remoteOrderIds = new Set(incomingOrders.map((o) => o.id));
+        const unsyncedLocalOrders = current.orders.filter(
+          (o) =>
+            !remoteOrderIds.has(o.id) &&
+            o.items.some((item) => pendingComandaIds.has(item.comandaId)),
+        );
+        const ordersAuthoritative =
+          this.stationRole !== 'mesonero' && !ordersSnap.metadata.fromCache;
+        if (ordersAuthoritative || !locationsSnap.empty) {
           this.local.replaceState({
             ...current,
             locations: mergedLocations,
-            ...(incomingOrders.length > 0 && this.stationRole !== 'mesonero'
-              ? { orders: incomingOrders }
+            ...(ordersAuthoritative
+              ? { orders: [...incomingOrders, ...unsyncedLocalOrders] }
               : {}),
           });
         }
@@ -1251,40 +1303,90 @@ export class FirebasePosRepository implements PosRepository {
   }
 
   async resetDemoData(): Promise<void> {
+    if (!this.isAdminWriter()) {
+      throw new Error('Solo Caja / Admin puede reiniciar los datos.');
+    }
+    // Preserve real printer config + BCV exchange rate across resets
+    const preservedSettings = this.local.getState().settings;
+    const failures: string[] = [];
+
+    const runStep = async (label: string, fn: () => Promise<void>): Promise<void> => {
+      try {
+        await withTimeout(fn(), 20000, label);
+      } catch (err) {
+        failures.push(label);
+        if (typeof console !== 'undefined') {
+          console.warn(`[FirebasePosRepository] reset step failed: ${label}`, err);
+        }
+      }
+    };
+
+    // 1. Delete all transactional history in the cloud (orders, comandas, print jobs, kardex, shifts)
+    for (const name of ['orders', 'comandas', 'printJobs', 'inventoryMovements', 'shifts']) {
+      await runStep(`borrar ${name}`, async () => {
+        const snap = await getDocs(collection(this.db, name));
+        await this.commitInChunks(snap.docs.map((d) => (b: WriteBatch) => b.delete(d.ref)));
+      });
+    }
+
+    // 2. Reset local state, keeping the real printer + exchange rate settings
     await this.local.resetDemoData();
+    const fresh = this.local.getState();
+    this.local.replaceState({ ...fresh, settings: preservedSettings });
     const state = this.local.getState();
-    const batch = writeBatch(this.db);
-    for (const loc of state.locations) {
-      batch.set(doc(this.db, 'locations', loc.id), stripUndefined(loc));
-    }
-    for (const item of state.menu) {
-      batch.set(doc(this.db, 'menu', item.id), stripUndefined(item));
-    }
-    for (const ing of state.ingredients) {
-      batch.set(doc(this.db, 'ingredients', ing.id), stripUndefined(ing));
-    }
-    for (const user of state.users) {
-      batch.set(doc(this.db, 'users', user.id), stripUndefined(user));
-    }
-    for (const shift of state.shifts) {
-      batch.set(doc(this.db, 'shifts', shift.id), stripUndefined(shift));
-    }
-    batch.set(doc(this.db, 'settings', 'app'), stripUndefined(state.settings), {
-      merge: true,
-    });
-    batch.set(
-      doc(this.db, 'settings', 'public'),
-      stripUndefined({
-        restaurantName: state.settings.printer.restaurantName,
-        printer: state.settings.printer,
-        exchangeRate: state.settings.exchangeRate,
-        exchangeRateUpdatedAt: state.settings.exchangeRateUpdatedAt,
-        exchangeRateSource: state.settings.exchangeRateSource,
-        updatedAt: new Date().toISOString(),
-      }),
-      { merge: true },
+
+    // 3. Re-seed catalogs and a fresh open shift in independent batches
+    await runStep('mesas y toldos', () =>
+      this.commitInChunks(
+        state.locations.map((loc) => (b: WriteBatch) =>
+          b.set(doc(this.db, 'locations', loc.id), stripUndefined(loc)),
+        ),
+      ),
     );
-    this.commitNonBlocking(batch.commit());
+    await runStep('menú', () =>
+      this.commitInChunks(
+        state.menu.map((item) => (b: WriteBatch) =>
+          b.set(doc(this.db, 'menu', item.id), stripUndefined(item), { merge: true }),
+        ),
+      ),
+    );
+    await runStep('inventario', () =>
+      this.commitInChunks(
+        state.ingredients.map((ing) => (b: WriteBatch) =>
+          b.set(doc(this.db, 'ingredients', ing.id), stripUndefined(ing), { merge: true }),
+        ),
+      ),
+    );
+    await runStep('usuarios', () =>
+      this.commitInChunks(
+        state.users.map((user) => (b: WriteBatch) =>
+          b.set(doc(this.db, 'users', user.id), stripUndefined(user), { merge: true }),
+        ),
+      ),
+    );
+    await runStep('turno', () =>
+      this.commitInChunks(
+        state.shifts.map((shift) => (b: WriteBatch) =>
+          b.set(doc(this.db, 'shifts', shift.id), stripUndefined(shift)),
+        ),
+      ),
+    );
+
+    if (failures.length > 0) {
+      throw new Error(
+        `Reinicio incompleto en la nube (falló: ${failures.join(', ')}). Revisa la conexión e intenta de nuevo.`,
+      );
+    }
+  }
+
+  private async commitInChunks(ops: Array<(batch: WriteBatch) => void>): Promise<void> {
+    for (let i = 0; i < ops.length; i += 400) {
+      const batch = writeBatch(this.db);
+      for (const op of ops.slice(i, i + 400)) {
+        op(batch);
+      }
+      await batch.commit();
+    }
   }
 }
 
