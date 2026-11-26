@@ -155,6 +155,13 @@ function buildPrintJobRecord(params: {
   };
 }
 
+export interface LocalPosRepositoryOptions {
+  /** Optional suffix to isolate localStorage keys per station role in cloud mode. */
+  storageKeySuffix?: string;
+  /** Disable BroadcastChannel when Firestore onSnapshot is the authoritative sync layer. */
+  enableBroadcastChannel?: boolean;
+}
+
 /**
  * Offline-first local repository backed by localStorage and BroadcastChannel so
  * Mesonero, Cocina and Caja tabs stay synchronized in real time.
@@ -164,10 +171,18 @@ export class LocalPosRepository implements PosRepository {
   private offlineQueue: Set<string>;
   private readonly listeners = new Set<(state: PosState) => void>();
   private readonly instanceId = createId('tab');
+  private readonly storageKey: string;
+  private readonly offlineQueueKey: string;
+  private readonly enableBroadcastChannel: boolean;
   private channel: BroadcastChannel | null = null;
 
-  constructor() {
-    const savedState = readJsonStorage<PosState>(POS_STORAGE_KEY);
+  constructor(options: LocalPosRepositoryOptions = {}) {
+    const suffix = options.storageKeySuffix ? `_${options.storageKeySuffix}` : '';
+    this.storageKey = `${POS_STORAGE_KEY}${suffix}`;
+    this.offlineQueueKey = `${POS_OFFLINE_QUEUE_KEY}${suffix}`;
+    this.enableBroadcastChannel = options.enableBroadcastChannel ?? true;
+
+    const savedState = readJsonStorage<PosState>(this.storageKey);
     if (savedState && Array.isArray(savedState.locations) && savedState.locations.length > 0) {
       let needsPersist = false;
       if (savedState.settings?.printer?.restaurantName === 'Brisa Marina Beach Club') {
@@ -187,21 +202,24 @@ export class LocalPosRepository implements PosRepository {
         needsPersist = true;
       }
       if (needsPersist) {
-        writeJsonStorage(POS_STORAGE_KEY, savedState);
+        writeJsonStorage(this.storageKey, savedState);
       }
       this.state = savedState;
     } else {
       this.state = createInitialPosState();
-      writeJsonStorage(POS_STORAGE_KEY, this.state);
+      writeJsonStorage(this.storageKey, this.state);
     }
 
-    const savedQueue = readJsonStorage<string[]>(POS_OFFLINE_QUEUE_KEY);
+    const savedQueue = readJsonStorage<string[]>(this.offlineQueueKey);
     this.offlineQueue = new Set(Array.isArray(savedQueue) ? savedQueue : []);
 
     this.ensureChannel();
   }
 
   private ensureChannel(): BroadcastChannel | null {
+    if (!this.enableBroadcastChannel) {
+      return null;
+    }
     if (this.channel) {
       return this.channel;
     }
@@ -253,7 +271,7 @@ export class LocalPosRepository implements PosRepository {
    */
   replaceState(nextState: PosState): void {
     this.state = nextState;
-    writeJsonStorage(POS_STORAGE_KEY, this.state);
+    writeJsonStorage(this.storageKey, this.state);
     this.notifyListeners();
   }
 
@@ -284,8 +302,8 @@ export class LocalPosRepository implements PosRepository {
 
   private commit(nextState: PosState): void {
     this.state = nextState;
-    writeJsonStorage(POS_STORAGE_KEY, this.state);
-    writeJsonStorage(POS_OFFLINE_QUEUE_KEY, Array.from(this.offlineQueue));
+    writeJsonStorage(this.storageKey, this.state);
+    writeJsonStorage(this.offlineQueueKey, Array.from(this.offlineQueue));
     this.postBroadcast({
       sourceId: this.instanceId,
       state: this.state,

@@ -23,7 +23,7 @@ const PRINT_STATUS_INFO: Record<PrintStatus, { label: string; className: string 
   },
   pending: { label: 'Pendiente', className: 'bg-[#B45309]/12 text-[#B45309] border-[#B45309]/30' },
   printing: { label: 'Pendiente', className: 'bg-[#B45309]/12 text-[#B45309] border-[#B45309]/30' },
-  failed: { label: 'Error', className: 'bg-[#B91C1C]/12 text-[#B91C1C] border-[#B91C1C]/30' },
+  failed: { label: 'Error impresora', className: 'bg-[#B91C1C]/12 text-[#B91C1C] border-[#B91C1C]/30' },
 };
 
 function getTimerPillClass(minutes: number): string {

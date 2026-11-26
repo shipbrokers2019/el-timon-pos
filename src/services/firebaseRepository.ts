@@ -140,7 +140,7 @@ export function initFirestoreClient(config: FirebaseOptions): Firestore {
  * offline queue flushing on reconnect, and station-scoped queries compliant with firestore.rules.
  */
 export class FirebasePosRepository implements PosRepository {
-  private readonly local = new LocalPosRepository();
+  private readonly local: LocalPosRepository;
   private readonly db: Firestore;
   private readonly stationRole: Role | null;
   private readonly unsubscribes: Unsubscribe[] = [];
@@ -148,6 +148,12 @@ export class FirebasePosRepository implements PosRepository {
   constructor(config: FirebaseOptions, stationRole: Role | null = null) {
     this.db = initFirestoreClient(config);
     this.stationRole = stationRole;
+    // Isolate local cache per station role and disable BroadcastChannel so role-scoped
+    // stations (e.g. Cocina with orders: []) can NEVER overwrite Caja/Mesonero state in the same browser.
+    this.local = new LocalPosRepository({
+      storageKeySuffix: stationRole ?? 'cloud',
+      enableBroadcastChannel: false,
+    });
     this.attachListeners();
     if (this.isAdminWriter()) {
       void this.ensureInitialCloudSeed();
@@ -729,14 +735,25 @@ export class FirebasePosRepository implements PosRepository {
     if (!comanda) return;
 
     const batch = writeBatch(this.db);
-    batch.set(doc(this.db, 'comandas', comanda.id), stripUndefined(comanda), {
-      merge: true,
-    });
+    // Send ONLY the mutated KDS fields so diff(resource.data).affectedKeys() stays strictly within allowed keys
+    const comandaPatch: Record<string, unknown> = {
+      status: comanda.status,
+      updatedAt: comanda.updatedAt,
+    };
+    if (comanda.completedAt) {
+      comandaPatch.completedAt = comanda.completedAt;
+    }
+    batch.set(doc(this.db, 'comandas', comanda.id), comandaPatch, { merge: true });
+
     // Cocina station has no write permission on /locations; Mesonero/Caja listeners derive kitchenReadyAlert from comandas
     if (status === 'lista' && this.stationRole !== 'cocina') {
       const loc = state.locations.find((l) => l.id === comanda.locationId);
       if (loc) {
-        batch.set(doc(this.db, 'locations', loc.id), stripUndefined(loc), { merge: true });
+        batch.set(
+          doc(this.db, 'locations', loc.id),
+          { kitchenReadyAlert: true },
+          { merge: true },
+        );
       }
     }
     this.commitNonBlocking(batch.commit());
@@ -1051,13 +1068,25 @@ export class FirebasePosRepository implements PosRepository {
     if (!job) return;
 
     const batch = writeBatch(this.db);
-    batch.set(doc(this.db, 'printJobs', job.id), stripUndefined(job), { merge: true });
+    // Send ONLY mutated print-state fields so role-scoped rules (Cocina/Mesonero) see exact affectedKeys()
+    const jobPatch: Record<string, unknown> = {
+      status: job.status,
+    };
+    if (job.printedAt) {
+      jobPatch.printedAt = job.printedAt;
+    }
+    if (job.error !== undefined) {
+      jobPatch.error = job.error;
+    }
+    batch.set(doc(this.db, 'printJobs', job.id), jobPatch, { merge: true });
     if (job.type === 'comanda') {
       const comanda = state.comandas.find((c) => c.id === job.referenceId);
       if (comanda) {
-        batch.set(doc(this.db, 'comandas', comanda.id), stripUndefined(comanda), {
-          merge: true,
-        });
+        batch.set(
+          doc(this.db, 'comandas', comanda.id),
+          { printStatus: comanda.printStatus },
+          { merge: true },
+        );
       }
     }
     this.commitNonBlocking(batch.commit());

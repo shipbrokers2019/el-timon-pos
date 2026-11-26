@@ -79,4 +79,32 @@ describe('firebaseRepository resilience helpers', () => {
     expect(state.locations.filter((l) => l.zone === 'toldos')).toHaveLength(18);
     expect(state.locations.find((l) => l.id === 'mesa-1')?.status).toBe('ocupada');
   });
+
+  it('isolates station-scoped LocalPosRepository instances so Cocina cannot wipe Caja orders', async () => {
+    const cajaRepo = new LocalPosRepository({
+      storageKeySuffix: 'caja_admin',
+      enableBroadcastChannel: false,
+    });
+    const cocinaRepo = new LocalPosRepository({
+      storageKeySuffix: 'cocina',
+      enableBroadcastChannel: false,
+    });
+
+    await cajaRepo.submitComanda({
+      locationId: 'mesa-3',
+      waiterId: 'user-maria',
+      waiterName: 'María (Mesonera)',
+      items: [{ menuItemId: 'menu-hamburguesa-playera', quantity: 1, notes: '' }],
+    });
+
+    expect(cajaRepo.getState().orders).toHaveLength(1);
+
+    // Cocina mutates its own isolated cache (orders stays empty in Cocina)
+    await cocinaRepo.createTestPrintJob();
+
+    // Caja's orders and Mesa 3 state remain completely intact
+    expect(cajaRepo.getState().orders).toHaveLength(1);
+    expect(cajaRepo.getState().orders[0]?.locationId).toBe('mesa-3');
+    expect(cocinaRepo.getState().orders).toHaveLength(0);
+  });
 });
