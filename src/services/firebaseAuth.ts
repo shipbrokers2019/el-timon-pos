@@ -1,47 +1,27 @@
-import { getApp, getApps, initializeApp } from 'firebase/app';
 import {
-  browserLocalPersistence,
-  browserSessionPersistence,
   getAuth,
-  initializeAuth,
   onAuthStateChanged,
-  setPersistence,
   signInWithEmailAndPassword,
   signOut,
   type User,
 } from 'firebase/auth';
 import { doc, getDoc } from 'firebase/firestore';
 import type { Role } from '../types/pos';
-import { getFirebaseEnvConfig, initFirestoreClient } from './firebaseRepository';
+import {
+  clearTabStation,
+  getFirebaseEnvConfig,
+  getStationFirebaseApp,
+  initFirestoreClient,
+  readActiveStationKey,
+  rememberStationKey,
+  stationKeyFromEmail,
+  type StationKey,
+} from './firebaseRepository';
 
 const CACHED_STATION_ROLE_PREFIX = 'eltimon_station_role_';
-export const TAB_SESSION_ONLY_KEY = 'eltimon_tab_session_only';
 
-let authInitializedWithSessionOnly: boolean | null = null;
-
-export function isTabSessionOnlyMode(): boolean {
-  return (
-    typeof sessionStorage !== 'undefined' &&
-    sessionStorage.getItem(TAB_SESSION_ONLY_KEY) === '1'
-  );
-}
-
-function getStationAuth(app: ReturnType<typeof getApp>) {
-  const wantsSessionOnly = isTabSessionOnlyMode();
-  if (authInitializedWithSessionOnly === null) {
-    authInitializedWithSessionOnly = wantsSessionOnly;
-    if (wantsSessionOnly) {
-      try {
-        return initializeAuth(app, {
-          persistence: browserSessionPersistence,
-        });
-      } catch {
-        return getAuth(app);
-      }
-    }
-  }
-  return getAuth(app);
-}
+/** Station slot this page subscribed to on load (switching slots requires one reload). */
+let subscribedStationKey: StationKey | null = null;
 
 export interface FirebaseStationSession {
   uid: string;
@@ -64,23 +44,23 @@ function setCachedRole(uid: string, role: Role): void {
 }
 
 function inferRoleFromEmail(email: string | null): Role | null {
-  if (!email) return null;
-  const lower = email.toLowerCase();
-  if (lower.startsWith('cocina@')) return 'cocina';
-  if (lower.startsWith('mesonero@')) return 'mesonero';
-  if (lower.startsWith('caja@') || lower.startsWith('admin@')) return 'caja_admin';
+  const key = stationKeyFromEmail(email);
+  if (key === 'cocina') return 'cocina';
+  if (key === 'mesonero') return 'mesonero';
+  if (key === 'caja') return 'caja_admin';
   return null;
 }
 
-function getFirebaseAppInstance() {
+function getStationAuth(key: StationKey) {
   const config = getFirebaseEnvConfig();
-  if (!config) {
-    return null;
-  }
-  return getApps().length > 0 ? getApp() : initializeApp(config);
+  if (!config) return null;
+  return getAuth(getStationFirebaseApp(config, key));
 }
 
-export async function resolveStationRole(user: User): Promise<Role | null> {
+export async function resolveStationRole(
+  user: User,
+  key: StationKey | null = readActiveStationKey(),
+): Promise<Role | null> {
   // 1. Prefer custom claim if set
   try {
     const tokenResult = await user.getIdTokenResult();
@@ -101,7 +81,7 @@ export async function resolveStationRole(user: User): Promise<Role | null> {
   const config = getFirebaseEnvConfig();
   if (config) {
     try {
-      const db = initFirestoreClient(config);
+      const db = initFirestoreClient(config, key);
       const snap = await getDoc(doc(db, 'stationAuth', user.uid));
       if (snap.exists()) {
         const data = snap.data() as { role?: unknown; active?: unknown };
@@ -131,13 +111,14 @@ export function subscribeStationAuth(
     error: string | null;
   }) => void,
 ): () => void {
-  const app = getFirebaseAppInstance();
-  if (!app) {
+  const key = readActiveStationKey();
+  subscribedStationKey = key;
+  const auth = key ? getStationAuth(key) : null;
+  if (!auth) {
     onChange({ loading: false, session: null, error: null });
     return () => {};
   }
 
-  const auth = getStationAuth(app);
   onChange({ loading: true, session: null, error: null });
 
   return onAuthStateChanged(auth, (user) => {
@@ -146,7 +127,7 @@ export function subscribeStationAuth(
       return;
     }
 
-    void resolveStationRole(user).then((role) => {
+    void resolveStationRole(user, key).then((role) => {
       if (!role) {
         onChange({
           loading: false,
@@ -168,38 +149,23 @@ export function subscribeStationAuth(
 export async function signInStation(
   email: string,
   password: string,
-  options?: { sessionOnly?: boolean },
 ): Promise<FirebaseStationSession> {
-  const app = getFirebaseAppInstance();
-  if (!app) {
+  const key = stationKeyFromEmail(email) ?? readActiveStationKey() ?? 'caja';
+  const auth = getStationAuth(key);
+  if (!auth) {
     throw new Error('Firebase no está configurado en este entorno.');
   }
-  const auth = getStationAuth(app);
-  const sessionOnly = options?.sessionOnly === true;
-  const needsReloadToIsolate =
-    sessionOnly && authInitializedWithSessionOnly !== true;
-  if (typeof sessionStorage !== 'undefined') {
-    if (sessionOnly) {
-      sessionStorage.setItem(TAB_SESSION_ONLY_KEY, '1');
-    } else {
-      sessionStorage.removeItem(TAB_SESSION_ONLY_KEY);
-    }
-  }
-  await setPersistence(
-    auth,
-    sessionOnly ? browserSessionPersistence : browserLocalPersistence,
-  );
   const credential = await signInWithEmailAndPassword(auth, email.trim(), password);
-  const role = await resolveStationRole(credential.user);
+  const role = await resolveStationRole(credential.user, key);
   if (!role) {
     await signOut(auth);
     throw new Error(
       'Esta cuenta no está autorizada como estación activa (verifica stationAuth en Firestore).',
     );
   }
-  if (needsReloadToIsolate && typeof window !== 'undefined') {
-    // Reload this tab so Firebase Auth (initializeAuth) and Firestore (memoryLocalCache)
-    // boot strictly isolated to sessionStorage and ignore other tabs' IndexedDB state.
+  rememberStationKey(key);
+  if (key !== subscribedStationKey && typeof window !== 'undefined') {
+    // This tab switched to a different station slot: reload once so App subscribes to it.
     window.location.reload();
   }
   return {
@@ -209,8 +175,21 @@ export async function signInStation(
   };
 }
 
+/**
+ * Leaves the station in THIS tab only (other tabs on the same station stay signed in)
+ * and returns to the station activation screen.
+ */
+export function switchStationInThisTab(): void {
+  clearTabStation();
+  if (typeof window !== 'undefined') {
+    window.location.reload();
+  }
+}
+
+/** Fully signs out the station account currently used by this tab. */
 export async function signOutStation(): Promise<void> {
-  const app = getFirebaseAppInstance();
-  if (!app) return;
-  await signOut(getStationAuth(app));
+  const key = readActiveStationKey();
+  const auth = key ? getStationAuth(key) : null;
+  if (!auth) return;
+  await signOut(auth);
 }

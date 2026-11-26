@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Delete, Lock, LogOut, Unlock } from 'lucide-react';
-import { signOutStation } from '../services/firebaseAuth';
+import { switchStationInThisTab } from '../services/firebaseAuth';
 import { isFirebaseConfigured } from '../services/firebaseRepository';
 import { usePos } from '../store/PosProvider';
 import type { Role } from '../types/pos';
@@ -237,7 +237,7 @@ export function PinLoginScreen() {
           {isFirebaseConfigured() && (
             <button
               type="button"
-              onClick={() => void signOutStation()}
+              onClick={() => switchStationInThisTab()}
               className="inline-flex items-center gap-1.5 text-xs font-semibold text-[#0E7490] hover:underline cursor-pointer"
             >
               <LogOut className="h-3.5 w-3.5" aria-hidden="true" />

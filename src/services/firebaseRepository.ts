@@ -1,4 +1,4 @@
-import { getApp, getApps, initializeApp, type FirebaseOptions } from 'firebase/app';
+import { getApps, initializeApp, type FirebaseApp, type FirebaseOptions } from 'firebase/app';
 import {
   collection,
   doc,
@@ -6,7 +6,6 @@ import {
   getDocs,
   getFirestore,
   initializeFirestore,
-  memoryLocalCache,
   onSnapshot,
   persistentLocalCache,
   persistentMultipleTabManager,
@@ -144,18 +143,79 @@ function withTimeout<T>(operation: Promise<T>, ms: number, label: string): Promi
   });
 }
 
-export function initFirestoreClient(config: FirebaseOptions): Firestore {
-  const app = getApps().length > 0 ? getApp() : initializeApp(config);
-  const tabSessionOnly =
-    typeof sessionStorage !== 'undefined' &&
-    sessionStorage.getItem('eltimon_tab_session_only') === '1';
+export type StationKey = 'caja' | 'mesonero' | 'cocina';
+
+const TAB_STATION_KEY = 'eltimon_tab_station_v2';
+const LAST_STATION_KEY = 'eltimon_last_station_v2';
+const NO_STATION = 'none';
+
+function isStationKey(value: unknown): value is StationKey {
+  return value === 'caja' || value === 'mesonero' || value === 'cocina';
+}
+
+/** Maps a station account email to its isolated Firebase app slot. */
+export function stationKeyFromEmail(email: string | null | undefined): StationKey | null {
+  if (!email) return null;
+  const lower = email.trim().toLowerCase();
+  if (lower.startsWith('cocina@')) return 'cocina';
+  if (lower.startsWith('mesonero@')) return 'mesonero';
+  if (lower.startsWith('caja@') || lower.startsWith('admin@')) return 'caja';
+  return null;
+}
+
+/** Each station runs in its own named Firebase app so auth + cache never collide across tabs. */
+export function stationAppName(key: StationKey): string {
+  return `eltimon-${key}`;
+}
+
+/**
+ * Station chosen for THIS tab (sessionStorage), falling back to the last station
+ * activated on this device (localStorage) so physical tablets survive restarts.
+ */
+export function readActiveStationKey(): StationKey | null {
+  if (typeof sessionStorage !== 'undefined') {
+    const tabValue = sessionStorage.getItem(TAB_STATION_KEY);
+    if (tabValue === NO_STATION) return null;
+    if (isStationKey(tabValue)) return tabValue;
+  }
+  if (typeof localStorage !== 'undefined') {
+    const lastValue = localStorage.getItem(LAST_STATION_KEY);
+    if (isStationKey(lastValue)) return lastValue;
+  }
+  return null;
+}
+
+export function rememberStationKey(key: StationKey): void {
+  if (typeof sessionStorage !== 'undefined') {
+    sessionStorage.setItem(TAB_STATION_KEY, key);
+  }
+  if (typeof localStorage !== 'undefined') {
+    localStorage.setItem(LAST_STATION_KEY, key);
+  }
+}
+
+/** Detaches this tab from its station WITHOUT signing out other tabs using that station. */
+export function clearTabStation(): void {
+  if (typeof sessionStorage !== 'undefined') {
+    sessionStorage.setItem(TAB_STATION_KEY, NO_STATION);
+  }
+}
+
+export function getStationFirebaseApp(config: FirebaseOptions, key: StationKey): FirebaseApp {
+  const name = stationAppName(key);
+  return getApps().find((a) => a.name === name) ?? initializeApp(config, name);
+}
+
+export function initFirestoreClient(
+  config: FirebaseOptions,
+  key: StationKey | null = readActiveStationKey(),
+): Firestore {
+  const app = getStationFirebaseApp(config, key ?? 'caja');
   try {
     return initializeFirestore(app, {
-      localCache: tabSessionOnly
-        ? memoryLocalCache()
-        : persistentLocalCache({
-            tabManager: persistentMultipleTabManager(),
-          }),
+      localCache: persistentLocalCache({
+        tabManager: persistentMultipleTabManager(),
+      }),
       experimentalAutoDetectLongPolling: true,
     });
   } catch {
