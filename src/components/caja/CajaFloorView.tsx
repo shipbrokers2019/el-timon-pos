@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import {
   AlertCircle,
   Ban,
+  BellRing,
   CheckCircle2,
   Clock,
   CreditCard,
@@ -62,6 +63,7 @@ export function CajaFloorView() {
     voidOrderItem,
     createPreCuentaPrintJob,
     releaseLocation,
+    acknowledgeKitchenReady,
   } = usePos();
 
   const [zoneFilter, setZoneFilter] = useState<ZoneFilter>('todas');
@@ -118,6 +120,14 @@ export function CajaFloorView() {
 
   const porCobrarLocations = useMemo(
     () => state.locations.filter((loc) => loc.status === 'por_cobrar'),
+    [state.locations],
+  );
+
+  const readyLocations = useMemo(
+    () =>
+      state.locations.filter(
+        (loc) => loc.status !== 'libre' && loc.kitchenReadyAlert === true,
+      ),
     [state.locations],
   );
 
@@ -333,6 +343,12 @@ export function CajaFloorView() {
                 </span>
               )}
             </div>
+            {loc.kitchenReadyAlert && (
+              <div className="mt-1 inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-[#047857] text-white text-[11px] font-bold">
+                <BellRing className="h-3 w-3" aria-hidden="true" />
+                <span>Listo en cocina</span>
+              </div>
+            )}
           </div>
         ) : (
           <p className="text-xs font-medium text-[#0F2A36]/55">
@@ -345,6 +361,46 @@ export function CajaFloorView() {
 
   return (
     <div className="space-y-5">
+      {/* Kitchen-ready notification banner */}
+      {readyLocations.length > 0 && (
+        <div
+          role="status"
+          aria-live="polite"
+          className="rounded-2xl bg-[#047857] text-white p-4 shadow-md space-y-2.5"
+        >
+          <div className="flex items-center gap-2 text-sm sm:text-base font-extrabold">
+            <BellRing className="h-5 w-5 shrink-0 animate-bounce" aria-hidden="true" />
+            <span>
+              ¡Orden lista en cocina! ({readyLocations.length}{' '}
+              {readyLocations.length === 1 ? 'ubicación lista' : 'ubicaciones listas'} para entregar)
+            </span>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            {readyLocations.map((loc) => (
+              <div
+                key={loc.id}
+                className="inline-flex items-center gap-2 rounded-xl bg-white/15 border border-white/25 pl-3 pr-1.5 py-1.5"
+              >
+                <button
+                  type="button"
+                  onClick={() => handleSelectLocation(loc.id)}
+                  className="text-sm font-extrabold underline-offset-2 hover:underline cursor-pointer"
+                >
+                  {loc.label}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void acknowledgeKitchenReady(loc.id)}
+                  className="min-h-9 px-2.5 rounded-lg bg-white text-[#047857] hover:bg-emerald-50 text-xs font-extrabold cursor-pointer"
+                >
+                  Confirmar entrega
+                </button>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       {/* Filter bar */}
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="flex flex-wrap items-center gap-2" role="group" aria-label="Filtrar ubicaciones">
@@ -507,6 +563,22 @@ export function CajaFloorView() {
             </div>
 
             <div className="p-4 space-y-4">
+              {selectedLocation.kitchenReadyAlert && (
+                <div className="p-3 rounded-xl bg-[#047857] text-white flex items-center justify-between gap-3">
+                  <div className="flex items-center gap-2 text-sm font-bold">
+                    <BellRing className="h-4 w-4 shrink-0" aria-hidden="true" />
+                    <span>Listo en cocina</span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => void acknowledgeKitchenReady(selectedLocation.id)}
+                    className="min-h-10 px-3 rounded-lg bg-white text-[#047857] text-xs font-bold cursor-pointer"
+                  >
+                    Confirmar entrega
+                  </button>
+                </div>
+              )}
+
               {selectedOrder ? (
                 <>
                   {/* Running Totals with 16% IVA Breakdown */}

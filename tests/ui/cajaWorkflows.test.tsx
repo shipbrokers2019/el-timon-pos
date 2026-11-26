@@ -339,4 +339,31 @@ describe('Caja / Admin Complete Suite & App Wiring', () => {
     expect(screen.getByText(/Hamburguesa Playera/i)).toBeInTheDocument();
     expect(screen.getByText(/Cerveza Polar Pilsen/i)).toBeInTheDocument();
   });
+
+  it('8. Caja displays the ¡Orden lista en cocina! notification banner and table badge when Cocina marks an order ready', async () => {
+    const user = userEvent.setup({ delay: null });
+    const repo = new LocalPosRepository();
+
+    const { comanda } = await repo.submitComanda({
+      locationId: 'mesa-4',
+      waiterId: 'user-carlos',
+      waiterName: 'Carlos (Mesonero)',
+      items: [{ menuItemId: 'menu-pescado-frito', quantity: 2, notes: '' }],
+    });
+    expect(comanda).not.toBeNull();
+    await repo.updateComandaStatus(comanda!.id, 'lista');
+
+    renderApp(repo);
+    await enterPin(user, '0000');
+
+    const banner = await screen.findByRole('status');
+    expect(within(banner).getByText(/¡Orden lista en cocina!/i)).toBeInTheDocument();
+    expect(within(banner).getByRole('button', { name: 'Mesa 4' })).toBeInTheDocument();
+    expect(screen.getByText(/Listo en cocina/i)).toBeInTheDocument();
+
+    await user.click(within(banner).getByRole('button', { name: /Confirmar entrega/i }));
+    await waitFor(() => {
+      expect(screen.queryByText(/¡Orden lista en cocina!/i)).not.toBeInTheDocument();
+    });
+  });
 });

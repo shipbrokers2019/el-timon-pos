@@ -232,6 +232,7 @@ export class FirebasePosRepository implements PosRepository {
   private readonly db: Firestore;
   private readonly stationRole: Role | null;
   private readonly unsubscribes: Unsubscribe[] = [];
+  private readonly pendingReadyAlertIds = new Set<string>();
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private isDisposed = false;
 
@@ -470,19 +471,47 @@ export class FirebasePosRepository implements PosRepository {
       ...pendingLocal.filter((c) => !remoteIds.has(c.id)),
     ].sort((a, b) => a.sequenceNumber - b.sequenceNumber);
 
+    const locationsToAlert: string[] = [];
     const nextLocations =
       newlyReadyLocationIds.size > 0 && role !== 'cocina'
-        ? current.locations.map((loc) =>
-            newlyReadyLocationIds.has(loc.id) && loc.status !== 'libre'
-              ? { ...loc, kitchenReadyAlert: true }
-              : loc,
-          )
+        ? current.locations.map((loc) => {
+            if (newlyReadyLocationIds.has(loc.id) && loc.status !== 'libre') {
+              locationsToAlert.push(loc.id);
+              this.pendingReadyAlertIds.add(loc.id);
+              return { ...loc, kitchenReadyAlert: true };
+            }
+            return loc;
+          })
         : current.locations;
 
     this.local.replaceState({
       ...current,
       locations: nextLocations,
       comandas: merged,
+    });
+
+    // Persist kitchenReadyAlert to Firestore from Mesonero/Caja so reloads and other floor tabs keep the alert
+    for (const locId of locationsToAlert) {
+      this.commitNonBlocking(
+        updateDoc(doc(this.db, 'locations', locId), { kitchenReadyAlert: true }),
+      );
+    }
+  }
+
+  private mergeRemoteLocationsWithPendingAlerts(
+    remoteLocations: Location[],
+    currentLocations: Location[],
+  ): Location[] {
+    const merged = mergeLocationsWithBaseline(remoteLocations, currentLocations);
+    return merged.map((loc) => {
+      if (loc.status === 'libre' || loc.kitchenReadyAlert === true) {
+        this.pendingReadyAlertIds.delete(loc.id);
+        return loc;
+      }
+      if (this.pendingReadyAlertIds.has(loc.id)) {
+        return { ...loc, kitchenReadyAlert: true };
+      }
+      return loc;
     });
   }
 
@@ -522,7 +551,7 @@ export class FirebasePosRepository implements PosRepository {
             if (snap.empty) return;
             const current = this.local.getState();
             const remoteLocations = snap.docs.map((d) => d.data() as Location);
-            const mergedLocations = mergeLocationsWithBaseline(
+            const mergedLocations = this.mergeRemoteLocationsWithPendingAlerts(
               remoteLocations,
               current.locations,
             );
@@ -772,7 +801,7 @@ export class FirebasePosRepository implements PosRepository {
         const current = this.local.getState();
         const mergedLocations = locationsSnap.empty
           ? current.locations
-          : mergeLocationsWithBaseline(
+          : this.mergeRemoteLocationsWithPendingAlerts(
               locationsSnap.docs.map((d) => d.data() as Location),
               current.locations,
             );
@@ -1011,13 +1040,11 @@ export class FirebasePosRepository implements PosRepository {
   }
 
   async acknowledgeKitchenReady(locationId: string): Promise<void> {
+    this.pendingReadyAlertIds.delete(locationId);
     await this.local.acknowledgeKitchenReady(locationId);
-    const loc = this.local.getState().locations.find((l) => l.id === locationId);
-    if (loc) {
-      this.commitNonBlocking(
-        setDoc(doc(this.db, 'locations', loc.id), stripUndefined(loc), { merge: true }),
-      );
-    }
+    this.commitNonBlocking(
+      updateDoc(doc(this.db, 'locations', locationId), { kitchenReadyAlert: false }),
+    );
   }
 
   async requestCheck(locationId: string): Promise<void> {

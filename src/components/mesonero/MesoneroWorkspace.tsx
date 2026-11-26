@@ -21,7 +21,7 @@ const STATUS_BADGES: Record<Location['status'], { label: string; className: stri
 };
 
 export function MesoneroWorkspace() {
-  const { state } = usePos();
+  const { state, acknowledgeKitchenReady } = usePos();
   const [activeZone, setActiveZone] = useState<Zone>('mesas');
   const [selectedLocationId, setSelectedLocationId] = useState<string | null>(null);
   const [nowMs, setNowMs] = useState<number>(() => Date.now());
@@ -59,6 +59,14 @@ export function MesoneroWorkspace() {
 
   const visibleLocations = activeZone === 'mesas' ? mesas : toldos;
 
+  const readyLocations = useMemo(
+    () =>
+      state.locations.filter(
+        (loc) => loc.status !== 'libre' && loc.kitchenReadyAlert === true,
+      ),
+    [state.locations],
+  );
+
   const selectedLocation = useMemo(
     () => state.locations.find((loc) => loc.id === selectedLocationId) ?? null,
     [selectedLocationId, state.locations],
@@ -67,6 +75,48 @@ export function MesoneroWorkspace() {
   return (
     <main className="min-h-[calc(100vh-4rem)] bg-[#FAF8F4] text-[#0F2A36] p-4 sm:p-6">
       <div className="max-w-7xl mx-auto space-y-5">
+        {/* Prominent kitchen-ready notification banner across all zones */}
+        {readyLocations.length > 0 && (
+          <div
+            role="status"
+            aria-live="polite"
+            className="rounded-2xl bg-[#047857] text-white p-4 shadow-md space-y-2.5"
+          >
+            <div className="flex items-center gap-2 text-sm sm:text-base font-extrabold">
+              <BellRing className="h-5 w-5 shrink-0 animate-bounce" aria-hidden="true" />
+              <span>
+                ¡Orden lista en cocina! ({readyLocations.length}{' '}
+                {readyLocations.length === 1 ? 'ubicación lista' : 'ubicaciones listas'} para llevar)
+              </span>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              {readyLocations.map((loc) => (
+                <div
+                  key={loc.id}
+                  className="inline-flex items-center gap-2 rounded-xl bg-white/15 border border-white/25 pl-3 pr-1.5 py-1.5"
+                >
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setActiveZone(loc.zone);
+                      setSelectedLocationId(loc.id);
+                    }}
+                    className="text-sm font-extrabold underline-offset-2 hover:underline cursor-pointer"
+                  >
+                    {loc.label}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void acknowledgeKitchenReady(loc.id)}
+                    className="min-h-9 px-2.5 rounded-lg bg-white text-[#047857] hover:bg-emerald-50 text-xs font-extrabold cursor-pointer"
+                  >
+                    Confirmar entrega
+                  </button>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
         {/* Zone tabs */}
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div className="inline-flex gap-2" role="tablist" aria-label="Zonas del local">

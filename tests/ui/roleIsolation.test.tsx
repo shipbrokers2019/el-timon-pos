@@ -350,4 +350,30 @@ describe('Role Isolation & Core Tablet Flows (Mesonero & Cocina)', () => {
     });
     expect(screen.getByText(/Ingresa tu PIN de 4 dígitos/i)).toBeInTheDocument();
   });
+
+  it('10. When Cocina marks a comanda lista, Mesonero immediately sees the top ¡Orden lista en cocina! notification banner and can confirm delivery', async () => {
+    const user = userEvent.setup();
+    const repo = new LocalPosRepository();
+
+    const { comanda } = await repo.submitComanda({
+      locationId: 'mesa-1',
+      waiterId: 'user-carlos',
+      waiterName: 'Carlos (Mesonero)',
+      items: [{ menuItemId: 'menu-pescado-frito', quantity: 2, notes: '' }],
+    });
+    expect(comanda).not.toBeNull();
+    await repo.updateComandaStatus(comanda!.id, 'lista');
+
+    renderWithRepo(repo);
+    await enterPin(user, '1111');
+
+    const banner = await screen.findByRole('status');
+    expect(within(banner).getByText(/¡Orden lista en cocina!/i)).toBeInTheDocument();
+    expect(within(banner).getByRole('button', { name: 'Mesa 1' })).toBeInTheDocument();
+
+    await user.click(within(banner).getByRole('button', { name: /Confirmar entrega/i }));
+    await waitFor(() => {
+      expect(screen.queryByText(/¡Orden lista en cocina!/i)).not.toBeInTheDocument();
+    });
+  });
 });
