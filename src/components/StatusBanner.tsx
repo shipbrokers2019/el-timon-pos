@@ -1,4 +1,5 @@
 import { Cloud, HardDrive, LogOut, RefreshCw, Wifi, WifiOff } from 'lucide-react';
+import { isTabSessionOnlyMode } from '../services/firebaseAuth';
 import { isFirebaseConfigured } from '../services/firebaseRepository';
 import { usePos } from '../store/PosProvider';
 import type { Role } from '../types/pos';
@@ -83,7 +84,13 @@ export function StatusBanner() {
             ) : (
               <HardDrive className="h-3.5 w-3.5" aria-hidden="true" />
             )}
-            <span>{firebaseEnabled ? 'Firebase Nube' : 'Local Multi-Pestaña'}</span>
+            <span>
+              {firebaseEnabled
+                ? isTabSessionOnlyMode()
+                  ? 'Firebase Nube · Pestaña aislada'
+                  : 'Firebase Nube'
+                : 'Local Multi-Pestaña'}
+            </span>
           </span>
         </div>
 

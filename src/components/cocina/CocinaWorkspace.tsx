@@ -7,6 +7,7 @@ import {
   Flame,
   History,
   Printer,
+  RefreshCw,
 } from 'lucide-react';
 import { formatTicketText } from '../../domain/escpos';
 import { usePos } from '../../store/PosProvider';
@@ -37,10 +38,25 @@ function getTimerPillClass(minutes: number): string {
 }
 
 export function CocinaWorkspace() {
-  const { state, updateComandaStatus, reprintJob } = usePos();
+  const { state, updateComandaStatus, reprintJob, refreshFromCloud } = usePos();
   const [viewMode, setViewMode] = useState<'cola' | 'historial'>('cola');
   const [nowMs, setNowMs] = useState<number>(() => Date.now());
   const [syncError, setSyncError] = useState<string | null>(null);
+  const [isRefreshing, setIsRefreshing] = useState(false);
+
+  const handleManualRefresh = async () => {
+    setIsRefreshing(true);
+    setSyncError(null);
+    try {
+      await refreshFromCloud();
+    } catch (err) {
+      const message =
+        err instanceof Error ? err.message : 'No se pudo sincronizar con la nube.';
+      setSyncError(`Error al sincronizar: ${message}`);
+    } finally {
+      setIsRefreshing(false);
+    }
+  };
 
   const handleAdvanceStatus = async (comandaId: string, nextStatus: Comanda['status']) => {
     setSyncError(null);
@@ -157,7 +173,20 @@ export function CocinaWorkspace() {
             </h1>
           </div>
 
-          <div className="inline-flex gap-2">
+          <div className="inline-flex flex-wrap gap-2">
+            <button
+              type="button"
+              onClick={() => void handleManualRefresh()}
+              disabled={isRefreshing}
+              className="min-h-12 px-3.5 rounded-xl border border-white/15 bg-[#1F2937] hover:bg-[#374151] text-slate-200 text-sm font-bold inline-flex items-center gap-2 transition-colors cursor-pointer disabled:opacity-60"
+            >
+              <RefreshCw
+                className={`h-4 w-4 ${isRefreshing ? 'animate-spin' : ''}`}
+                aria-hidden="true"
+              />
+              <span>{isRefreshing ? 'Sincronizando...' : 'Actualizar'}</span>
+            </button>
+
             <button
               type="button"
               aria-pressed={viewMode === 'cola'}
@@ -165,7 +194,9 @@ export function CocinaWorkspace() {
               className={`min-h-12 px-4 rounded-xl border text-sm font-bold inline-flex items-center gap-2 transition-colors cursor-pointer ${
                 viewMode === 'cola'
                   ? 'bg-[#047857] border-[#047857] text-white'
-                  : 'bg-[#1F2937] border-white/15 text-slate-200 hover:bg-[#374151]'
+                  : activeComandas.length > 0
+                    ? 'bg-[#B45309] border-[#F59E0B] text-white animate-pulse'
+                    : 'bg-[#1F2937] border-white/15 text-slate-200 hover:bg-[#374151]'
               }`}
             >
               <Flame className="h-4 w-4" aria-hidden="true" />
@@ -187,6 +218,25 @@ export function CocinaWorkspace() {
             </button>
           </div>
         </div>
+
+        {/* Alert if user is inspecting Historial while new active comandas are waiting */}
+        {viewMode === 'historial' && activeComandas.length > 0 && (
+          <div
+            role="status"
+            className="rounded-xl border border-amber-400/50 bg-amber-950/70 px-4 py-3 text-sm font-bold text-amber-100 flex flex-wrap items-center justify-between gap-3"
+          >
+            <span>
+              Tienes {activeComandas.length} comanda(s) pendiente(s) esperando en Cola activa.
+            </span>
+            <button
+              type="button"
+              onClick={() => setViewMode('cola')}
+              className="min-h-10 px-4 rounded-lg bg-[#047857] hover:bg-[#065F46] text-white text-xs font-extrabold cursor-pointer"
+            >
+              Ver cola activa
+            </button>
+          </div>
+        )}
 
         {/* Sync error alert (if cloud rejects a status update) */}
         {syncError && (

@@ -59,6 +59,7 @@ export interface PosRepository {
   subscribe(listener: (state: PosState) => void): () => void;
   submitComanda(input: SubmitComandaInput): Promise<SubmitComandaResult>;
   syncOfflineQueue(): Promise<void>;
+  refreshFromCloud?(): Promise<void>;
   updateComandaStatus(comandaId: string, status: ComandaStatus): Promise<void>;
   acknowledgeKitchenReady(locationId: string): Promise<void>;
   requestCheck(locationId: string): Promise<void>;

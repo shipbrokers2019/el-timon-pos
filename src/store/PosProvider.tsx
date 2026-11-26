@@ -55,6 +55,7 @@ export interface PosContextValue {
   logout: () => void;
   submitComanda: (input: SubmitComandaInput) => Promise<SubmitComandaResult>;
   syncOfflineQueue: () => Promise<void>;
+  refreshFromCloud: () => Promise<void>;
   updateComandaStatus: (comandaId: string, status: ComandaStatus) => Promise<void>;
   acknowledgeKitchenReady: (locationId: string) => Promise<void>;
   requestCheck: (locationId: string) => Promise<void>;
@@ -376,6 +377,53 @@ export function PosProvider({
     state,
   ]);
 
+  const refreshFromCloud = useCallback(async () => {
+    if (typeof repo.refreshFromCloud === 'function') {
+      await repo.refreshFromCloud();
+    }
+  }, [repo]);
+
+  // Auto-refresh from Firestore on focus, tab resume, reconnect, and periodic safety poll for Cocina
+  useEffect(() => {
+    if (import.meta.env.MODE === 'test' || typeof window === 'undefined') {
+      return;
+    }
+    if (typeof repo.refreshFromCloud !== 'function') {
+      return;
+    }
+    const triggerRefresh = () => {
+      if (isOnlineRef.current) {
+        void repo.refreshFromCloud?.();
+      }
+    };
+    const handleVisibility = () => {
+      if (document.visibilityState === 'visible') {
+        triggerRefresh();
+      }
+    };
+    window.addEventListener('focus', triggerRefresh);
+    window.addEventListener('online', triggerRefresh);
+    document.addEventListener('visibilitychange', handleVisibility);
+
+    const intervalId =
+      effectiveRole === 'cocina'
+        ? window.setInterval(() => {
+            if (document.visibilityState === 'visible') {
+              triggerRefresh();
+            }
+          }, 15000)
+        : null;
+
+    return () => {
+      window.removeEventListener('focus', triggerRefresh);
+      window.removeEventListener('online', triggerRefresh);
+      document.removeEventListener('visibilitychange', handleVisibility);
+      if (intervalId !== null) {
+        window.clearInterval(intervalId);
+      }
+    };
+  }, [effectiveRole, repo]);
+
   const setLockedStationRole = useCallback((role: Role | null) => {
     if (typeof localStorage !== 'undefined') {
       if (role === null) {
@@ -574,6 +622,7 @@ export function PosProvider({
     logout,
     submitComanda,
     syncOfflineQueue: () => repo.syncOfflineQueue(),
+    refreshFromCloud,
     updateComandaStatus: (comandaId, status) =>
       repo.updateComandaStatus(comandaId, status),
     acknowledgeKitchenReady: (locationId) =>

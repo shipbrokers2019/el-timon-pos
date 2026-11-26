@@ -136,6 +136,7 @@ export function initFirestoreClient(config: FirebaseOptions): Firestore {
         : persistentLocalCache({
             tabManager: persistentMultipleTabManager(),
           }),
+      experimentalAutoDetectLongPolling: true,
     });
   } catch {
     return getFirestore(app);
@@ -151,6 +152,8 @@ export class FirebasePosRepository implements PosRepository {
   private readonly db: Firestore;
   private readonly stationRole: Role | null;
   private readonly unsubscribes: Unsubscribe[] = [];
+  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private isDisposed = false;
 
   constructor(config: FirebaseOptions, stationRole: Role | null = null) {
     this.db = initFirestoreClient(config);
@@ -332,30 +335,119 @@ export class FirebasePosRepository implements PosRepository {
     return ids;
   }
 
+  private handleSnapshotError(label: string, err: unknown): void {
+    if (typeof console !== 'undefined') {
+      console.warn(`[FirebasePosRepository] onSnapshot(${label}) error:`, err);
+    }
+    if (this.isDisposed || this.reconnectTimer !== null) {
+      return;
+    }
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null;
+      if (this.isDisposed) return;
+      for (const unsub of this.unsubscribes) {
+        unsub();
+      }
+      this.unsubscribes.length = 0;
+      this.attachListeners();
+      void this.refreshFromCloud();
+    }, 3000);
+  }
+
+  private applyRemoteComandas(remoteComandas: PosState['comandas']): void {
+    const role = this.stationRole;
+    const current = this.local.getState();
+    const pendingLocal = current.comandas.filter((c) => c.pendingSync === true);
+    if (remoteComandas.length === 0 && pendingLocal.length === 0) return;
+
+    const prevStatusById = new Map(current.comandas.map((c) => [c.id, c.status]));
+    const newlyReadyLocationIds = new Set<string>();
+    for (const comanda of remoteComandas) {
+      const prevStatus = prevStatusById.get(comanda.id);
+      if (
+        comanda.status === 'lista' &&
+        comanda.isVoidAlert !== true &&
+        prevStatus !== undefined &&
+        prevStatus !== 'lista'
+      ) {
+        newlyReadyLocationIds.add(comanda.locationId);
+      }
+    }
+
+    const pendingMap = new Map(pendingLocal.map((c) => [c.id, c]));
+    const remoteIds = new Set(remoteComandas.map((c) => c.id));
+    const merged = [
+      ...remoteComandas.map((c) => pendingMap.get(c.id) ?? c),
+      ...pendingLocal.filter((c) => !remoteIds.has(c.id)),
+    ].sort((a, b) => a.sequenceNumber - b.sequenceNumber);
+
+    const nextLocations =
+      newlyReadyLocationIds.size > 0 && role !== 'cocina'
+        ? current.locations.map((loc) =>
+            newlyReadyLocationIds.has(loc.id) && loc.status !== 'libre'
+              ? { ...loc, kitchenReadyAlert: true }
+              : loc,
+          )
+        : current.locations;
+
+    this.local.replaceState({
+      ...current,
+      locations: nextLocations,
+      comandas: merged,
+    });
+  }
+
+  private applyRemotePrintJobs(remoteJobs: PrintJob[]): void {
+    const current = this.local.getState();
+    const pendingComandaIds = this.getPendingComandaIds(current);
+    const pendingLocalJobs = current.printJobs.filter((job) =>
+      pendingComandaIds.has(job.referenceId),
+    );
+    if (remoteJobs.length === 0 && pendingLocalJobs.length === 0) return;
+
+    const pendingJobMap = new Map(pendingLocalJobs.map((j) => [j.id, j]));
+    const remoteIds = new Set(remoteJobs.map((j) => j.id));
+    const merged = [
+      ...remoteJobs.map((j) => pendingJobMap.get(j.id) ?? j),
+      ...pendingLocalJobs.filter((j) => !remoteIds.has(j.id)),
+    ];
+
+    this.local.replaceState({ ...current, printJobs: merged });
+  }
+
   private attachListeners(): void {
+    this.isDisposed = false;
     const role = this.stationRole;
 
     if (role !== 'cocina') {
       this.unsubscribes.push(
-        onSnapshot(collection(this.db, 'locations'), (snap) => {
-          if (snap.empty) return;
-          const current = this.local.getState();
-          const remoteLocations = snap.docs.map((d) => d.data() as Location);
-          const mergedLocations = mergeLocationsWithBaseline(
-            remoteLocations,
-            current.locations,
-          );
-          this.local.replaceState({ ...current, locations: mergedLocations });
-        }),
+        onSnapshot(
+          collection(this.db, 'locations'),
+          (snap) => {
+            if (snap.empty) return;
+            const current = this.local.getState();
+            const remoteLocations = snap.docs.map((d) => d.data() as Location);
+            const mergedLocations = mergeLocationsWithBaseline(
+              remoteLocations,
+              current.locations,
+            );
+            this.local.replaceState({ ...current, locations: mergedLocations });
+          },
+          (err) => this.handleSnapshotError('locations', err),
+        ),
       );
 
       this.unsubscribes.push(
-        onSnapshot(collection(this.db, 'menu'), (snap) => {
-          if (snap.empty) return;
-          const current = this.local.getState();
-          const menu = snap.docs.map((d) => d.data() as MenuItem);
-          this.local.replaceState({ ...current, menu });
-        }),
+        onSnapshot(
+          collection(this.db, 'menu'),
+          (snap) => {
+            if (snap.empty) return;
+            const current = this.local.getState();
+            const menu = snap.docs.map((d) => d.data() as MenuItem);
+            this.local.replaceState({ ...current, menu });
+          },
+          (err) => this.handleSnapshotError('menu', err),
+        ),
       );
 
       // Mesonero queries MUST filter status == 'abierta' per firestore.rules
@@ -365,212 +457,246 @@ export class FirebasePosRepository implements PosRepository {
           : collection(this.db, 'orders');
 
       this.unsubscribes.push(
-        onSnapshot(ordersQuery, (snap) => {
-          const current = this.local.getState();
-          const incoming = snap.docs.map((d) => d.data() as Order);
-          const pendingComandaIds = this.getPendingComandaIds(current);
-          const pendingLocationOrderIds = new Set(
-            current.locations
-              .filter((loc) => loc.pendingSync === true && loc.activeOrderId)
-              .map((loc) => loc.activeOrderId as string),
-          );
-          const isLocalUnsynced = (order: Order): boolean =>
-            pendingLocationOrderIds.has(order.id) ||
-            order.items.some((item) => pendingComandaIds.has(item.comandaId));
-
-          const unsyncedLocal = current.orders.filter(isLocalUnsynced);
-          const unsyncedMap = new Map(unsyncedLocal.map((o) => [o.id, o]));
-          const remoteIds = new Set(incoming.map((o) => o.id));
-
-          if (role === 'mesonero') {
-            const preservedClosed = current.orders.filter(
-              (o) => o.status === 'cerrada' && !remoteIds.has(o.id) && !unsyncedMap.has(o.id),
+        onSnapshot(
+          ordersQuery,
+          (snap) => {
+            const current = this.local.getState();
+            const incoming = snap.docs.map((d) => d.data() as Order);
+            const pendingComandaIds = this.getPendingComandaIds(current);
+            const pendingLocationOrderIds = new Set(
+              current.locations
+                .filter((loc) => loc.pendingSync === true && loc.activeOrderId)
+                .map((loc) => loc.activeOrderId as string),
             );
-            const mergedIncoming = incoming.map((o) => unsyncedMap.get(o.id) ?? o);
-            const extraUnsynced = unsyncedLocal.filter((o) => !remoteIds.has(o.id));
-            this.local.replaceState({
-              ...current,
-              orders: [...preservedClosed, ...mergedIncoming, ...extraUnsynced],
-            });
-            return;
-          }
+            const isLocalUnsynced = (order: Order): boolean =>
+              pendingLocationOrderIds.has(order.id) ||
+              order.items.some((item) => pendingComandaIds.has(item.comandaId));
 
-          if (snap.empty && unsyncedLocal.length === 0) return;
-          const mergedOrders = [
-            ...incoming.map((o) => unsyncedMap.get(o.id) ?? o),
-            ...unsyncedLocal.filter((o) => !remoteIds.has(o.id)),
-          ];
-          this.local.replaceState({ ...current, orders: mergedOrders });
-        }),
+            const unsyncedLocal = current.orders.filter(isLocalUnsynced);
+            const unsyncedMap = new Map(unsyncedLocal.map((o) => [o.id, o]));
+            const remoteIds = new Set(incoming.map((o) => o.id));
+
+            if (role === 'mesonero') {
+              const preservedClosed = current.orders.filter(
+                (o) => o.status === 'cerrada' && !remoteIds.has(o.id) && !unsyncedMap.has(o.id),
+              );
+              const mergedIncoming = incoming.map((o) => unsyncedMap.get(o.id) ?? o);
+              const extraUnsynced = unsyncedLocal.filter((o) => !remoteIds.has(o.id));
+              this.local.replaceState({
+                ...current,
+                orders: [...preservedClosed, ...mergedIncoming, ...extraUnsynced],
+              });
+              return;
+            }
+
+            if (snap.empty && unsyncedLocal.length === 0) return;
+            const mergedOrders = [
+              ...incoming.map((o) => unsyncedMap.get(o.id) ?? o),
+              ...unsyncedLocal.filter((o) => !remoteIds.has(o.id)),
+            ];
+            this.local.replaceState({ ...current, orders: mergedOrders });
+          },
+          (err) => this.handleSnapshotError('orders', err),
+        ),
       );
     }
 
     this.unsubscribes.push(
-      onSnapshot(collection(this.db, 'comandas'), (snap) => {
-        const current = this.local.getState();
-        const remoteComandas = snap.docs.map((d) => d.data() as PosState['comandas'][number]);
-        const pendingLocal = current.comandas.filter((c) => c.pendingSync === true);
-        if (snap.empty && pendingLocal.length === 0) return;
-
-        const prevStatusById = new Map(current.comandas.map((c) => [c.id, c.status]));
-        const newlyReadyLocationIds = new Set<string>();
-        for (const comanda of remoteComandas) {
-          const prevStatus = prevStatusById.get(comanda.id);
-          if (
-            comanda.status === 'lista' &&
-            comanda.isVoidAlert !== true &&
-            prevStatus !== undefined &&
-            prevStatus !== 'lista'
-          ) {
-            newlyReadyLocationIds.add(comanda.locationId);
-          }
-        }
-
-        const pendingMap = new Map(pendingLocal.map((c) => [c.id, c]));
-        const remoteIds = new Set(remoteComandas.map((c) => c.id));
-        const merged = [
-          ...remoteComandas.map((c) => pendingMap.get(c.id) ?? c),
-          ...pendingLocal.filter((c) => !remoteIds.has(c.id)),
-        ].sort((a, b) => a.sequenceNumber - b.sequenceNumber);
-
-        const nextLocations =
-          newlyReadyLocationIds.size > 0 && role !== 'cocina'
-            ? current.locations.map((loc) =>
-                newlyReadyLocationIds.has(loc.id) && loc.status !== 'libre'
-                  ? { ...loc, kitchenReadyAlert: true }
-                  : loc,
-              )
-            : current.locations;
-
-        this.local.replaceState({
-          ...current,
-          locations: nextLocations,
-          comandas: merged,
-        });
-      }),
+      onSnapshot(
+        collection(this.db, 'comandas'),
+        (snap) => {
+          this.applyRemoteComandas(
+            snap.docs.map((d) => d.data() as PosState['comandas'][number]),
+          );
+        },
+        (err) => this.handleSnapshotError('comandas', err),
+      ),
     );
 
     this.unsubscribes.push(
-      onSnapshot(collection(this.db, 'printJobs'), (snap) => {
-        const current = this.local.getState();
-        const remoteJobs = snap.docs.map((d) => d.data() as PrintJob);
-        const pendingComandaIds = this.getPendingComandaIds(current);
-        const pendingLocalJobs = current.printJobs.filter((job) =>
-          pendingComandaIds.has(job.referenceId),
-        );
-        if (snap.empty && pendingLocalJobs.length === 0) return;
-
-        const pendingJobMap = new Map(pendingLocalJobs.map((j) => [j.id, j]));
-        const remoteIds = new Set(remoteJobs.map((j) => j.id));
-        const merged = [
-          ...remoteJobs.map((j) => pendingJobMap.get(j.id) ?? j),
-          ...pendingLocalJobs.filter((j) => !remoteIds.has(j.id)),
-        ];
-
-        this.local.replaceState({ ...current, printJobs: merged });
-      }),
+      onSnapshot(
+        collection(this.db, 'printJobs'),
+        (snap) => {
+          this.applyRemotePrintJobs(snap.docs.map((d) => d.data() as PrintJob));
+        },
+        (err) => this.handleSnapshotError('printJobs', err),
+      ),
     );
 
     this.unsubscribes.push(
-      onSnapshot(doc(this.db, 'settings', 'public'), (snap) => {
-        if (!snap.exists()) return;
-        const data = snap.data() as Partial<{
-          restaurantName: string;
-          printer: PrinterConfig;
-          exchangeRate: number;
-          exchangeRateUpdatedAt: string;
-          exchangeRateSource: string;
-        }>;
-        const current = this.local.getState();
-        this.local.replaceState({
-          ...current,
-          settings: {
-            ...current.settings,
-            ...(typeof data.exchangeRate === 'number' && data.exchangeRate > 0
-              ? { exchangeRate: data.exchangeRate }
-              : {}),
-            ...(data.exchangeRateUpdatedAt
-              ? { exchangeRateUpdatedAt: data.exchangeRateUpdatedAt }
-              : {}),
-            ...(data.exchangeRateSource !== undefined
-              ? { exchangeRateSource: data.exchangeRateSource }
-              : {}),
-            printer: {
-              ...current.settings.printer,
-              ...(data.printer ?? {}),
-              restaurantName:
-                data.restaurantName ??
-                data.printer?.restaurantName ??
-                current.settings.printer.restaurantName,
-            },
-          },
-        });
-      }),
-    );
-
-    if (this.isAdminWriter()) {
-      this.unsubscribes.push(
-        onSnapshot(collection(this.db, 'ingredients'), (snap) => {
-          if (snap.empty) return;
-          const current = this.local.getState();
-          this.local.replaceState({
-            ...current,
-            ingredients: snap.docs.map((d) => d.data() as Ingredient),
-          });
-        }),
-      );
-
-      this.unsubscribes.push(
-        onSnapshot(collection(this.db, 'inventoryMovements'), (snap) => {
-          if (snap.empty) return;
-          const current = this.local.getState();
-          this.local.replaceState({
-            ...current,
-            movements: snap.docs.map((d) => d.data() as InventoryMovement),
-          });
-        }),
-      );
-
-      this.unsubscribes.push(
-        onSnapshot(collection(this.db, 'shifts'), (snap) => {
-          if (snap.empty) return;
-          const current = this.local.getState();
-          this.local.replaceState({
-            ...current,
-            shifts: snap.docs.map((d) => d.data() as Shift),
-          });
-        }),
-      );
-
-      this.unsubscribes.push(
-        onSnapshot(collection(this.db, 'users'), (snap) => {
-          if (snap.empty) return;
-          const current = this.local.getState();
-          this.local.replaceState({
-            ...current,
-            users: snap.docs.map((d) => d.data() as UserProfile),
-          });
-        }),
-      );
-
-      this.unsubscribes.push(
-        onSnapshot(doc(this.db, 'settings', 'app'), (snap) => {
+      onSnapshot(
+        doc(this.db, 'settings', 'public'),
+        (snap) => {
           if (!snap.exists()) return;
-          const data = snap.data() as Partial<PosState['settings']>;
+          const data = snap.data() as Partial<{
+            restaurantName: string;
+            printer: PrinterConfig;
+            exchangeRate: number;
+            exchangeRateUpdatedAt: string;
+            exchangeRateSource: string;
+          }>;
           const current = this.local.getState();
           this.local.replaceState({
             ...current,
             settings: {
               ...current.settings,
-              ...data,
+              ...(typeof data.exchangeRate === 'number' && data.exchangeRate > 0
+                ? { exchangeRate: data.exchangeRate }
+                : {}),
+              ...(data.exchangeRateUpdatedAt
+                ? { exchangeRateUpdatedAt: data.exchangeRateUpdatedAt }
+                : {}),
+              ...(data.exchangeRateSource !== undefined
+                ? { exchangeRateSource: data.exchangeRateSource }
+                : {}),
+              printer: {
+                ...current.settings.printer,
+                ...(data.printer ?? {}),
+                restaurantName:
+                  data.restaurantName ??
+                  data.printer?.restaurantName ??
+                  current.settings.printer.restaurantName,
+              },
             },
           });
-        }),
+        },
+        (err) => this.handleSnapshotError('settings/public', err),
+      ),
+    );
+
+    if (this.isAdminWriter()) {
+      this.unsubscribes.push(
+        onSnapshot(
+          collection(this.db, 'ingredients'),
+          (snap) => {
+            if (snap.empty) return;
+            const current = this.local.getState();
+            this.local.replaceState({
+              ...current,
+              ingredients: snap.docs.map((d) => d.data() as Ingredient),
+            });
+          },
+          (err) => this.handleSnapshotError('ingredients', err),
+        ),
+      );
+
+      this.unsubscribes.push(
+        onSnapshot(
+          collection(this.db, 'inventoryMovements'),
+          (snap) => {
+            if (snap.empty) return;
+            const current = this.local.getState();
+            this.local.replaceState({
+              ...current,
+              movements: snap.docs.map((d) => d.data() as InventoryMovement),
+            });
+          },
+          (err) => this.handleSnapshotError('inventoryMovements', err),
+        ),
+      );
+
+      this.unsubscribes.push(
+        onSnapshot(
+          collection(this.db, 'shifts'),
+          (snap) => {
+            if (snap.empty) return;
+            const current = this.local.getState();
+            this.local.replaceState({
+              ...current,
+              shifts: snap.docs.map((d) => d.data() as Shift),
+            });
+          },
+          (err) => this.handleSnapshotError('shifts', err),
+        ),
+      );
+
+      this.unsubscribes.push(
+        onSnapshot(
+          collection(this.db, 'users'),
+          (snap) => {
+            if (snap.empty) return;
+            const current = this.local.getState();
+            this.local.replaceState({
+              ...current,
+              users: snap.docs.map((d) => d.data() as UserProfile),
+            });
+          },
+          (err) => this.handleSnapshotError('users', err),
+        ),
+      );
+
+      this.unsubscribes.push(
+        onSnapshot(
+          doc(this.db, 'settings', 'app'),
+          (snap) => {
+            if (!snap.exists()) return;
+            const data = snap.data() as Partial<PosState['settings']>;
+            const current = this.local.getState();
+            this.local.replaceState({
+              ...current,
+              settings: {
+                ...current.settings,
+                ...data,
+              },
+            });
+          },
+          (err) => this.handleSnapshotError('settings/app', err),
+        ),
       );
     }
   }
 
+  async refreshFromCloud(): Promise<void> {
+    try {
+      const [comandasSnap, printJobsSnap] = await Promise.all([
+        getDocs(collection(this.db, 'comandas')),
+        getDocs(collection(this.db, 'printJobs')),
+      ]);
+      this.applyRemoteComandas(
+        comandasSnap.docs.map((d) => d.data() as PosState['comandas'][number]),
+      );
+      this.applyRemotePrintJobs(printJobsSnap.docs.map((d) => d.data() as PrintJob));
+
+      if (this.stationRole !== 'cocina') {
+        const ordersQuery =
+          this.stationRole === 'mesonero'
+            ? query(collection(this.db, 'orders'), where('status', '==', 'abierta'))
+            : collection(this.db, 'orders');
+        const [locationsSnap, ordersSnap] = await Promise.all([
+          getDocs(collection(this.db, 'locations')),
+          getDocs(ordersQuery),
+        ]);
+        const current = this.local.getState();
+        const mergedLocations = locationsSnap.empty
+          ? current.locations
+          : mergeLocationsWithBaseline(
+              locationsSnap.docs.map((d) => d.data() as Location),
+              current.locations,
+            );
+        const incomingOrders = ordersSnap.docs.map((d) => d.data() as Order);
+        if (incomingOrders.length > 0 || !locationsSnap.empty) {
+          this.local.replaceState({
+            ...current,
+            locations: mergedLocations,
+            ...(incomingOrders.length > 0 && this.stationRole !== 'mesonero'
+              ? { orders: incomingOrders }
+              : {}),
+          });
+        }
+      }
+    } catch (err) {
+      if (typeof console !== 'undefined') {
+        console.warn('[FirebasePosRepository] refreshFromCloud failed:', err);
+      }
+    }
+  }
+
   dispose(): void {
+    this.isDisposed = true;
+    if (this.reconnectTimer !== null) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
     for (const unsub of this.unsubscribes) {
       unsub();
     }
