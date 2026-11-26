@@ -322,4 +322,32 @@ describe('Role Isolation & Core Tablet Flows (Mesonero & Cocina)', () => {
     expect(bodyText).not.toMatch(/Inventario/i);
     expect(bodyText).not.toMatch(/Estadísticas/i);
   });
+
+  it('9. Changing forcedStationRole immediately signs out a mismatched PIN user so a tab can never render Cocina under another station role', async () => {
+    const user = userEvent.setup();
+    const repo = new LocalPosRepository();
+
+    const { rerender } = render(
+      <PosProvider repository={repo} forcedStationRole="cocina">
+        <PosTestShell />
+      </PosProvider>,
+    );
+
+    // Log in with Cocina PIN 2222 while station is locked to Cocina
+    await enterPin(user, '2222');
+    expect(await screen.findByText(/Pantalla de Cocina \(KDS\)/i)).toBeInTheDocument();
+
+    // Simulate Firebase station role switching to mesonero (e.g., cross-tab auth change)
+    rerender(
+      <PosProvider repository={repo} forcedStationRole="mesonero">
+        <PosTestShell />
+      </PosProvider>,
+    );
+
+    // CocinaWorkspace MUST immediately disappear and return to PIN login locked to Mesonero
+    await waitFor(() => {
+      expect(screen.queryByText(/Pantalla de Cocina \(KDS\)/i)).not.toBeInTheDocument();
+    });
+    expect(screen.getByText(/Ingresa tu PIN de 4 dígitos/i)).toBeInTheDocument();
+  });
 });

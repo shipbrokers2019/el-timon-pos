@@ -6,6 +6,7 @@ import {
   getDocs,
   getFirestore,
   initializeFirestore,
+  memoryLocalCache,
   onSnapshot,
   persistentLocalCache,
   persistentMultipleTabManager,
@@ -125,11 +126,16 @@ export function isFirebaseConfigured(): boolean {
 
 export function initFirestoreClient(config: FirebaseOptions): Firestore {
   const app = getApps().length > 0 ? getApp() : initializeApp(config);
+  const tabSessionOnly =
+    typeof sessionStorage !== 'undefined' &&
+    sessionStorage.getItem('eltimon_tab_session_only') === '1';
   try {
     return initializeFirestore(app, {
-      localCache: persistentLocalCache({
-        tabManager: persistentMultipleTabManager(),
-      }),
+      localCache: tabSessionOnly
+        ? memoryLocalCache()
+        : persistentLocalCache({
+            tabManager: persistentMultipleTabManager(),
+          }),
     });
   } catch {
     return getFirestore(app);

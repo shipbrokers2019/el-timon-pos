@@ -1,7 +1,11 @@
 import { getApp, getApps, initializeApp } from 'firebase/app';
 import {
+  browserLocalPersistence,
+  browserSessionPersistence,
   getAuth,
+  initializeAuth,
   onAuthStateChanged,
+  setPersistence,
   signInWithEmailAndPassword,
   signOut,
   type User,
@@ -11,6 +15,33 @@ import type { Role } from '../types/pos';
 import { getFirebaseEnvConfig, initFirestoreClient } from './firebaseRepository';
 
 const CACHED_STATION_ROLE_PREFIX = 'eltimon_station_role_';
+export const TAB_SESSION_ONLY_KEY = 'eltimon_tab_session_only';
+
+let authInitializedWithSessionOnly: boolean | null = null;
+
+export function isTabSessionOnlyMode(): boolean {
+  return (
+    typeof sessionStorage !== 'undefined' &&
+    sessionStorage.getItem(TAB_SESSION_ONLY_KEY) === '1'
+  );
+}
+
+function getStationAuth(app: ReturnType<typeof getApp>) {
+  const wantsSessionOnly = isTabSessionOnlyMode();
+  if (authInitializedWithSessionOnly === null) {
+    authInitializedWithSessionOnly = wantsSessionOnly;
+    if (wantsSessionOnly) {
+      try {
+        return initializeAuth(app, {
+          persistence: browserSessionPersistence,
+        });
+      } catch {
+        return getAuth(app);
+      }
+    }
+  }
+  return getAuth(app);
+}
 
 export interface FirebaseStationSession {
   uid: string;
@@ -106,7 +137,7 @@ export function subscribeStationAuth(
     return () => {};
   }
 
-  const auth = getAuth(app);
+  const auth = getStationAuth(app);
   onChange({ loading: true, session: null, error: null });
 
   return onAuthStateChanged(auth, (user) => {
@@ -137,12 +168,27 @@ export function subscribeStationAuth(
 export async function signInStation(
   email: string,
   password: string,
+  options?: { sessionOnly?: boolean },
 ): Promise<FirebaseStationSession> {
   const app = getFirebaseAppInstance();
   if (!app) {
     throw new Error('Firebase no está configurado en este entorno.');
   }
-  const auth = getAuth(app);
+  const auth = getStationAuth(app);
+  const sessionOnly = options?.sessionOnly === true;
+  const needsReloadToIsolate =
+    sessionOnly && authInitializedWithSessionOnly !== true;
+  if (typeof sessionStorage !== 'undefined') {
+    if (sessionOnly) {
+      sessionStorage.setItem(TAB_SESSION_ONLY_KEY, '1');
+    } else {
+      sessionStorage.removeItem(TAB_SESSION_ONLY_KEY);
+    }
+  }
+  await setPersistence(
+    auth,
+    sessionOnly ? browserSessionPersistence : browserLocalPersistence,
+  );
   const credential = await signInWithEmailAndPassword(auth, email.trim(), password);
   const role = await resolveStationRole(credential.user);
   if (!role) {
@@ -150,6 +196,11 @@ export async function signInStation(
     throw new Error(
       'Esta cuenta no está autorizada como estación activa (verifica stationAuth en Firestore).',
     );
+  }
+  if (needsReloadToIsolate && typeof window !== 'undefined') {
+    // Reload this tab so Firebase Auth (initializeAuth) and Firestore (memoryLocalCache)
+    // boot strictly isolated to sessionStorage and ignore other tabs' IndexedDB state.
+    window.location.reload();
   }
   return {
     uid: credential.user.uid,
@@ -161,5 +212,5 @@ export async function signInStation(
 export async function signOutStation(): Promise<void> {
   const app = getFirebaseAppInstance();
   if (!app) return;
-  await signOut(getAuth(app));
+  await signOut(getStationAuth(app));
 }

@@ -1,6 +1,6 @@
 import { useState, type FormEvent } from 'react';
 import { AlertCircle, Cloud, Lock } from 'lucide-react';
-import { signInStation } from '../services/firebaseAuth';
+import { isTabSessionOnlyMode, signInStation } from '../services/firebaseAuth';
 import { BrandLogo } from './BrandLogo';
 
 const STATION_PRESETS = [
@@ -16,6 +16,7 @@ interface FirebaseStationGateProps {
 export function FirebaseStationGate({ externalError }: FirebaseStationGateProps) {
   const [email, setEmail] = useState('caja@eltimon.pos');
   const [password, setPassword] = useState('');
+  const [sessionOnly, setSessionOnly] = useState(() => isTabSessionOnlyMode());
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -28,7 +29,7 @@ export function FirebaseStationGate({ externalError }: FirebaseStationGateProps)
     setSubmitting(true);
     setError(null);
     try {
-      await signInStation(email, password);
+      await signInStation(email, password, { sessionOnly });
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Error de autenticación.';
       if (msg.includes('auth/invalid-credential') || msg.includes('auth/wrong-password')) {
@@ -119,6 +120,21 @@ export function FirebaseStationGate({ externalError }: FirebaseStationGateProps)
               className="w-full min-h-12 px-3.5 rounded-xl bg-white border border-[#0F2A36]/20 text-sm font-semibold text-[#0F2A36] focus:outline-2 focus:outline-[#0E7490]"
             />
           </div>
+
+          <label className="flex items-start gap-2.5 p-3 rounded-xl bg-white/80 border border-[#0F2A36]/15 text-xs font-semibold text-[#0F2A36] cursor-pointer">
+            <input
+              type="checkbox"
+              checked={sessionOnly}
+              onChange={(e) => setSessionOnly(e.target.checked)}
+              className="mt-0.5 h-4 w-4 accent-[#0E7490] shrink-0"
+            />
+            <span>
+              Solo en esta pestaña{' '}
+              <span className="font-normal text-[#0F2A36]/70">
+                (actívalo si estás probando Caja, Mesonero y Cocina a la vez en el mismo navegador)
+              </span>
+            </span>
+          </label>
 
           {displayError && (
             <p

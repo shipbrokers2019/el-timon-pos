@@ -322,8 +322,24 @@ export function PosProvider({
     if (!currentUserId) {
       return null;
     }
-    return state.users.find((u) => u.id === currentUserId && u.active) ?? null;
-  }, [currentUserId, state.users]);
+    const matched = state.users.find((u) => u.id === currentUserId && u.active) ?? null;
+    // Never allow a tab to keep rendering a workspace whose role differs from the active Firebase station
+    if (matched && lockedStationRole && matched.role !== lockedStationRole) {
+      return null;
+    }
+    return matched;
+  }, [currentUserId, lockedStationRole, state.users]);
+
+  useEffect(() => {
+    if (!currentUserId || !lockedStationRole) {
+      return;
+    }
+    const matched = state.users.find((u) => u.id === currentUserId && u.active);
+    if (matched && matched.role !== lockedStationRole) {
+      setCurrentUserId(null);
+      writeSessionValue(CURRENT_USER_KEY, null);
+    }
+  }, [currentUserId, lockedStationRole, state.users]);
 
   const effectiveRole = activeRole ?? currentUser?.role ?? null;
 
