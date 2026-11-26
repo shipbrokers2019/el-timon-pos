@@ -40,6 +40,18 @@ export function CocinaWorkspace() {
   const { state, updateComandaStatus, reprintJob } = usePos();
   const [viewMode, setViewMode] = useState<'cola' | 'historial'>('cola');
   const [nowMs, setNowMs] = useState<number>(() => Date.now());
+  const [syncError, setSyncError] = useState<string | null>(null);
+
+  const handleAdvanceStatus = async (comandaId: string, nextStatus: Comanda['status']) => {
+    setSyncError(null);
+    try {
+      await updateComandaStatus(comandaId, nextStatus);
+    } catch (err) {
+      const message =
+        err instanceof Error ? err.message : 'No se pudo actualizar el estado en la nube.';
+      setSyncError(`Error al actualizar comanda: ${message}`);
+    }
+  };
 
   useEffect(() => {
     const timer = window.setInterval(() => setNowMs(Date.now()), 15000);
@@ -176,6 +188,23 @@ export function CocinaWorkspace() {
           </div>
         </div>
 
+        {/* Sync error alert (if cloud rejects a status update) */}
+        {syncError && (
+          <div
+            role="alert"
+            className="rounded-xl border border-red-400/50 bg-red-950/70 px-4 py-3 text-sm font-semibold text-red-100 flex items-center justify-between gap-3"
+          >
+            <span>{syncError}</span>
+            <button
+              type="button"
+              onClick={() => setSyncError(null)}
+              className="px-2.5 py-1 rounded-lg bg-white/10 hover:bg-white/20 text-xs font-bold cursor-pointer"
+            >
+              Cerrar
+            </button>
+          </div>
+        )}
+
         {/* Empty state */}
         {displayedComandas.length === 0 ? (
           <section className="rounded-2xl border border-white/15 bg-[#1F2937] p-8 text-center">
@@ -293,7 +322,7 @@ export function CocinaWorkspace() {
                     {viewMode === 'cola' && isVoidAlert && (
                       <button
                         type="button"
-                        onClick={() => void updateComandaStatus(comanda.id, 'lista')}
+                        onClick={() => void handleAdvanceStatus(comanda.id, 'lista')}
                         className="w-full min-h-12 px-4 rounded-xl bg-[#B91C1C] hover:bg-[#991B1B] text-white text-sm font-bold inline-flex items-center justify-center gap-2 cursor-pointer"
                       >
                         <CheckCircle2 className="h-4 w-4" aria-hidden="true" />
@@ -304,7 +333,7 @@ export function CocinaWorkspace() {
                     {viewMode === 'cola' && !isVoidAlert && comanda.status === 'pendiente' && (
                       <button
                         type="button"
-                        onClick={() => void updateComandaStatus(comanda.id, 'en_preparacion')}
+                        onClick={() => void handleAdvanceStatus(comanda.id, 'en_preparacion')}
                         className="w-full min-h-12 px-4 rounded-xl bg-[#B45309] hover:bg-[#92400E] text-white text-sm font-bold inline-flex items-center justify-center gap-2 cursor-pointer"
                       >
                         <Flame className="h-4 w-4" aria-hidden="true" />
@@ -317,7 +346,7 @@ export function CocinaWorkspace() {
                       comanda.status === 'en_preparacion' && (
                         <button
                           type="button"
-                          onClick={() => void updateComandaStatus(comanda.id, 'lista')}
+                          onClick={() => void handleAdvanceStatus(comanda.id, 'lista')}
                           className="w-full min-h-12 px-4 rounded-xl bg-[#047857] hover:bg-[#065F46] text-white text-sm font-bold inline-flex items-center justify-center gap-2 cursor-pointer"
                         >
                           <CheckCircle2 className="h-4 w-4" aria-hidden="true" />

@@ -11,6 +11,7 @@ import {
   persistentMultipleTabManager,
   query,
   setDoc,
+  updateDoc,
   where,
   writeBatch,
   type Firestore,
@@ -734,8 +735,7 @@ export class FirebasePosRepository implements PosRepository {
     const comanda = state.comandas.find((c) => c.id === comandaId);
     if (!comanda) return;
 
-    const batch = writeBatch(this.db);
-    // Send ONLY the mutated KDS fields so diff(resource.data).affectedKeys() stays strictly within allowed keys
+    // Send ONLY the mutated KDS fields via updateDoc so Firestore evaluates strictly as update
     const comandaPatch: Record<string, unknown> = {
       status: comanda.status,
       updatedAt: comanda.updatedAt,
@@ -743,10 +743,17 @@ export class FirebasePosRepository implements PosRepository {
     if (comanda.completedAt) {
       comandaPatch.completedAt = comanda.completedAt;
     }
+
+    if (this.stationRole === 'cocina') {
+      // Throw Firestore errors directly on Cocina so the UI displays any rejection instead of silently rolling back
+      await updateDoc(doc(this.db, 'comandas', comanda.id), comandaPatch);
+      return;
+    }
+
+    const batch = writeBatch(this.db);
     batch.set(doc(this.db, 'comandas', comanda.id), comandaPatch, { merge: true });
 
-    // Cocina station has no write permission on /locations; Mesonero/Caja listeners derive kitchenReadyAlert from comandas
-    if (status === 'lista' && this.stationRole !== 'cocina') {
+    if (status === 'lista') {
       const loc = state.locations.find((l) => l.id === comanda.locationId);
       if (loc) {
         batch.set(
