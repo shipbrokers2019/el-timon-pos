@@ -849,6 +849,12 @@ export class FirebasePosRepository implements PosRepository {
   }
 
   async settleOrder(orderId: string, payments: PaymentEntry[]): Promise<Order> {
+    const prevPendingComandaIds = new Set(
+      this.local
+        .getState()
+        .comandas.filter((c) => c.orderId === orderId && c.status !== 'lista')
+        .map((c) => c.id),
+    );
     const settled = await this.local.settleOrder(orderId, payments);
     const state = this.local.getState();
     const loc = state.locations.find((l) => l.id === settled.locationId);
@@ -863,6 +869,19 @@ export class FirebasePosRepository implements PosRepository {
     }
     if (shift) {
       batch.set(doc(this.db, 'shifts', shift.id), stripUndefined(shift), { merge: true });
+    }
+    for (const comanda of state.comandas) {
+      if (prevPendingComandaIds.has(comanda.id)) {
+        batch.set(
+          doc(this.db, 'comandas', comanda.id),
+          {
+            status: comanda.status,
+            updatedAt: comanda.updatedAt,
+            ...(comanda.completedAt ? { completedAt: comanda.completedAt } : {}),
+          },
+          { merge: true },
+        );
+      }
     }
     this.commitNonBlocking(batch.commit());
     return settled;

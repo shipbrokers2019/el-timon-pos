@@ -844,11 +844,24 @@ export class LocalPosRepository implements PosRepository {
         : loc,
     );
 
+    // Auto-complete any remaining active kitchen comandas for this settled order
+    const updatedComandas = this.state.comandas.map((comanda) =>
+      comanda.orderId === order.id && comanda.status !== 'lista'
+        ? {
+            ...comanda,
+            status: 'lista' as const,
+            updatedAt: nowIso,
+            completedAt: comanda.completedAt ?? nowIso,
+          }
+        : comanda,
+    );
+
     this.commit({
       ...this.state,
       locations: updatedLocations,
       orders: updatedOrders,
       shifts: updatedShifts,
+      comandas: updatedComandas,
     });
 
     return closedOrder;

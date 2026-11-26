@@ -107,4 +107,37 @@ describe('firebaseRepository resilience helpers', () => {
     expect(cajaRepo.getState().orders[0]?.locationId).toBe('mesa-3');
     expect(cocinaRepo.getState().orders).toHaveLength(0);
   });
+
+  it('auto-completes remaining active kitchen comandas when an order is settled and closed', async () => {
+    const repo = new LocalPosRepository({
+      storageKeySuffix: 'settle_comanda_lock',
+      enableBroadcastChannel: false,
+    });
+
+    const { order, comanda } = await repo.submitComanda({
+      locationId: 'mesa-1',
+      waiterId: 'user-maria',
+      waiterName: 'María (Mesonera)',
+      items: [{ menuItemId: 'menu-hamburguesa-playera', quantity: 1, notes: 'MEDIOM' }],
+    });
+
+    expect(comanda?.status).toBe('pendiente');
+
+    await repo.settleOrder(order.id, [
+      {
+        id: 'pay-lock-1',
+        method: 'zelle',
+        currency: 'USD',
+        amountNative: order.totalUsd,
+        amountUsd: order.totalUsd,
+        amountBs: order.totalBs,
+        exchangeRate: order.exchangeRate,
+        paidAt: new Date().toISOString(),
+      },
+    ]);
+
+    const afterComanda = repo.getState().comandas.find((c) => c.id === comanda?.id);
+    expect(afterComanda?.status).toBe('lista');
+    expect(afterComanda?.completedAt).toBeTruthy();
+  });
 });

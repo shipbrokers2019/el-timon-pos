@@ -229,7 +229,7 @@ service cloud.firestore {
   match /databases/{database}/documents {
 
     // ===============================================================
-    // Helper Functions — Authentication & Station RBAC
+    // Helper Functions — Authentication & Single-Lookup Station RBAC
     // ===============================================================
 
     function isAuthenticated() {
@@ -249,45 +249,33 @@ service cloud.firestore {
       return r is string && r in ['mesonero', 'cocina', 'caja_admin'];
     }
 
-    function hasStationDoc() {
-      return exists(/databases/$(database)/documents/stationAuth/$(request.auth.uid));
+    // Resolves the authenticated caller's active station role in at most
+    // ONE exists() + ONE get() lookup (avoids repeated lookups across branches).
+    function getAuthenticatedStationRole() {
+      let hasClaim = 'role' in request.auth.token;
+      let hasDoc = exists(/databases/$(database)/documents/stationAuth/$(request.auth.uid));
+      let docData = hasDoc ? get(/databases/$(database)/documents/stationAuth/$(request.auth.uid)).data : null;
+      let docActive = hasDoc && docData != null && ('active' in docData) && docData.active == true;
+      return hasClaim
+        ? (isValidRoleValue(request.auth.token.role) && (!hasDoc || docActive) ? request.auth.token.role : null)
+        : (docActive && ('role' in docData) && isValidRoleValue(docData.role) ? docData.role : null);
     }
 
-    function stationDoc() {
-      return get(/databases/$(database)/documents/stationAuth/$(request.auth.uid)).data;
-    }
-
-    // Checks authenticated user has active station role `r` via trusted
-    // Firebase Auth custom claim OR admin-managed `/stationAuth/{uid}` doc.
-    function hasRole(r) {
-      return isAuthenticated() && (
-        // Primary: trusted Auth custom claim (revoked if stationAuth marks active != true)
-        (('role' in request.auth.token) &&
-         request.auth.token.role == r &&
-         (!hasStationDoc() || stationDoc().active == true))
-        ||
-        // Fallback: admin-provisioned /stationAuth/{uid} document
-        (!('role' in request.auth.token) &&
-         hasStationDoc() &&
-         stationDoc().active == true &&
-         stationDoc().role == r)
-      );
+    function currentStationRole() {
+      return isAuthenticated() ? getAuthenticatedStationRole() : null;
     }
 
     function isAdmin() {
-      return hasRole('caja_admin');
-    }
-
-    function isMesonero() {
-      return hasRole('mesonero');
-    }
-
-    function isCocina() {
-      return hasRole('cocina');
+      return currentStationRole() == 'caja_admin';
     }
 
     function isAnyActiveStation() {
-      return isAdmin() || isMesonero() || isCocina();
+      return currentStationRole() != null;
+    }
+
+    function isFloorReader() {
+      let role = currentStationRole();
+      return role == 'mesonero' || role == 'caja_admin';
     }
 
     // ===============================================================
@@ -339,16 +327,9 @@ service cloud.firestore {
       return !(field in data) || (data[field] is int && data[field] >= minVal && data[field] <= maxVal);
     }
 
-    // Format-validated ISO-8601 timestamp string (bounded length prevents 1MB DoS)
-    function isValidDateString(dateStr) {
-      return dateStr is string &&
-        dateStr.size() >= 19 &&
-        dateStr.size() <= 40 &&
-        dateStr.matches("^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,9})?(Z|[+-]\\d{2}:\\d{2})?$");
-    }
-
+    // Native Firestore timestamp or bounded ISO-8601 string (19..40 chars, zero regex DoS/AST overhead)
     function isValidTimestampOrIso(val) {
-      return val is timestamp || isValidDateString(val);
+      return val is timestamp || (val is string && val.size() >= 19 && val.size() <= 40);
     }
 
     function isOptionalTimestampOrIso(data, field) {
@@ -368,26 +349,28 @@ service cloud.firestore {
     }
 
     function isValidPrinterConfig(printer) {
-      return printer is map &&
+      let coreOk = printer is map &&
         printer.keys().hasOnly([
           'restaurantName', 'ip', 'port',
           'autoPrintFromKitchen', 'lanFallbackEnabled',
           'paperWidthMm', 'autoPrintStation', 'enabled'
         ]) &&
         printer.keys().hasAll(['ip', 'port']) &&
-        (!('restaurantName' in printer) || (printer.restaurantName is string && printer.restaurantName.size() >= 1 && printer.restaurantName.size() <= 100)) &&
-        printer.ip is string && printer.ip.size() >= 1 && printer.ip.size() <= 64 &&
+        isOptionalString(printer, 'restaurantName', 1, 100) &&
+        isValidString(printer.ip, 1, 64) &&
         printer.ip.matches("^[a-zA-Z0-9._-]+$") &&
-        printer.port is int && printer.port >= 1 && printer.port <= 65535 &&
-        (!('autoPrintFromKitchen' in printer) || printer.autoPrintFromKitchen is bool) &&
-        (!('lanFallbackEnabled' in printer) || printer.lanFallbackEnabled is bool) &&
+        printer.port is int && printer.port >= 1 && printer.port <= 65535;
+
+      let optsOk = isOptionalBool(printer, 'autoPrintFromKitchen') &&
+        isOptionalBool(printer, 'lanFallbackEnabled') &&
         (!('paperWidthMm' in printer) || (printer.paperWidthMm is int && printer.paperWidthMm in [58, 80])) &&
         (!('autoPrintStation' in printer) || (printer.autoPrintStation is string && printer.autoPrintStation in ['cocina', 'emisor', 'caja_admin', 'manual'])) &&
-        (!('enabled' in printer) || printer.enabled is bool);
+        isOptionalBool(printer, 'enabled');
+
+      return coreOk && optsOk;
     }
 
-    // Minimal, rock-solid map guard (zero keys().hasOnly(), zero nested helpers,
-    // zero regex) so nested preFactura validation inside isValidOrder stays minimal.
+    // Minimal, bounded map guard for embedded preFactura snapshot inside /orders
     function isValidPreFactura(pf) {
       return pf is map &&
         pf.size() <= 20 &&
@@ -399,23 +382,28 @@ service cloud.firestore {
 
     // ===============================================================
     // Domain Validators (MUST be called in BOTH create AND update)
+    // All multi-field validators are grouped into short `let` blocks
+    // to stay well within Firestore Rules AST & expression limits.
     // ===============================================================
 
     function isValidStationAuth(data, uid) {
-      return hasOnlyAllowedFields(data, ['uid', 'role', 'active', 'label', 'deviceName', 'createdAt', 'updatedAt']) &&
+      let coreOk = hasOnlyAllowedFields(data, ['uid', 'role', 'active', 'label', 'deviceName', 'createdAt', 'updatedAt']) &&
         hasRequiredFields(data, ['uid', 'role', 'active']) &&
         isValidString(data.uid, 1, 128) &&
         data.uid == uid &&
         isValidRoleValue(data.role) &&
-        data.active is bool &&
-        isOptionalString(data, 'label', 1, 80) &&
+        data.active is bool;
+
+      let metaOk = isOptionalString(data, 'label', 1, 80) &&
         isOptionalString(data, 'deviceName', 1, 80) &&
         isOptionalTimestampOrIso(data, 'createdAt') &&
         isOptionalTimestampOrIso(data, 'updatedAt');
+
+      return coreOk && metaOk;
     }
 
     function isValidLocation(data, locationId) {
-      return hasOnlyAllowedFields(data, [
+      let coreOk = hasOnlyAllowedFields(data, [
           'id', 'zone', 'number', 'label', 'status',
           'activeOrderId', 'pendingSync', 'kitchenReadyAlert', 'preFacturaReady', 'updatedAt'
         ]) &&
@@ -425,16 +413,19 @@ service cloud.firestore {
         isValidZone(data.zone) &&
         data.number is int && data.number >= 1 && data.number <= 100 &&
         isValidString(data.label, 1, 40) &&
-        data.status in ['libre', 'ocupada', 'por_cobrar'] &&
-        isNullableString(data, 'activeOrderId', 1, 128) &&
+        data.status in ['libre', 'ocupada', 'por_cobrar'];
+
+      let metaOk = isNullableString(data, 'activeOrderId', 1, 128) &&
         isOptionalBool(data, 'pendingSync') &&
         isOptionalBool(data, 'kitchenReadyAlert') &&
         isOptionalBool(data, 'preFacturaReady') &&
         isOptionalTimestampOrIso(data, 'updatedAt');
+
+      return coreOk && metaOk;
     }
 
     function isValidMenuItem(data, menuItemId) {
-      return hasOnlyAllowedFields(data, [
+      let coreOk = hasOnlyAllowedFields(data, [
           'id', 'name', 'category', 'priceUsd', 'sendsToKitchen',
           'outOfStock', 'active', 'description', 'recipe', 'createdAt', 'updatedAt'
         ]) &&
@@ -443,48 +434,55 @@ service cloud.firestore {
         data.id == menuItemId &&
         isValidString(data.name, 1, 100) &&
         isValidString(data.category, 1, 50) &&
-        isValidNumberRange(data.priceUsd, 0, 10000) &&
-        data.sendsToKitchen is bool &&
+        isValidNumberRange(data.priceUsd, 0, 10000);
+
+      let metaOk = data.sendsToKitchen is bool &&
         data.outOfStock is bool &&
         isOptionalBool(data, 'active') &&
         isOptionalString(data, 'description', 0, 300) &&
         (!('recipe' in data) || (data.recipe is list && data.recipe.size() <= 30 && (data.recipe.size() == 0 || data.recipe[0] is map))) &&
         isOptionalTimestampOrIso(data, 'createdAt') &&
         isOptionalTimestampOrIso(data, 'updatedAt');
+
+      return coreOk && metaOk;
     }
 
     function isValidComanda(data, comandaId) {
-      return data.keys().hasOnly([
+      let coreOk = hasOnlyAllowedFields(data, [
           'id', 'orderId', 'locationId', 'locationLabel', 'zone',
           'sequenceNumber', 'ticketNumber', 'roundNumber', 'waiterId', 'waiterName',
           'items', 'status', 'isVoidAlert', 'voidReason',
           'printStatus', 'pendingSync', 'createdAt', 'updatedAt', 'completedAt'
         ]) &&
-        data.keys().hasAll(['id', 'orderId', 'locationId', 'items', 'status']) &&
-        data.id is string && data.id.size() >= 1 && data.id.size() <= 128 &&
+        hasRequiredFields(data, ['id', 'orderId', 'locationId', 'items', 'status']) &&
+        isValidString(data.id, 1, 128) &&
         data.id == comandaId &&
-        data.orderId is string && data.orderId.size() >= 1 && data.orderId.size() <= 128 &&
-        data.locationId is string && data.locationId.size() >= 1 && data.locationId.size() <= 64 &&
-        (!('locationLabel' in data) || (data.locationLabel is string && data.locationLabel.size() >= 1 && data.locationLabel.size() <= 40)) &&
-        (!('zone' in data) || (data.zone is string && data.zone in ['mesas', 'toldos'])) &&
-        (!('sequenceNumber' in data) || (data.sequenceNumber is int && data.sequenceNumber >= 1 && data.sequenceNumber <= 999999)) &&
-        (!('ticketNumber' in data) || (data.ticketNumber is int && data.ticketNumber >= 1 && data.ticketNumber <= 999999)) &&
-        (!('roundNumber' in data) || (data.roundNumber is int && data.roundNumber >= 1 && data.roundNumber <= 999)) &&
-        (!('waiterId' in data) || (data.waiterId is string && data.waiterId.size() >= 1 && data.waiterId.size() <= 128)) &&
-        (!('waiterName' in data) || (data.waiterName is string && data.waiterName.size() >= 1 && data.waiterName.size() <= 60)) &&
+        isValidString(data.orderId, 1, 128) &&
+        isValidString(data.locationId, 1, 64) &&
         data.items is list && data.items.size() >= 1 && data.items.size() <= 50 && data.items[0] is map &&
-        data.status is string && data.status in ['pendiente', 'en_preparacion', 'lista'] &&
-        (!('isVoidAlert' in data) || data.isVoidAlert is bool) &&
-        (!('voidReason' in data) || (data.voidReason is string && data.voidReason.size() <= 200)) &&
-        (!('printStatus' in data) || (data.printStatus is string && data.printStatus in ['pending', 'printing', 'printed', 'printed_locally', 'failed'])) &&
-        (!('pendingSync' in data) || data.pendingSync is bool) &&
-        (!('createdAt' in data) || isValidTimestampOrIso(data.createdAt)) &&
-        (!('updatedAt' in data) || isValidTimestampOrIso(data.updatedAt)) &&
-        (!('completedAt' in data) || data.completedAt == null || isValidTimestampOrIso(data.completedAt));
+        data.status is string && data.status in ['pendiente', 'en_preparacion', 'lista'];
+
+      let metaOk = isOptionalString(data, 'locationLabel', 1, 40) &&
+        (!('zone' in data) || isValidZone(data.zone)) &&
+        isOptionalIntRange(data, 'sequenceNumber', 1, 999999) &&
+        isOptionalIntRange(data, 'ticketNumber', 1, 999999) &&
+        isOptionalIntRange(data, 'roundNumber', 1, 999) &&
+        isOptionalString(data, 'waiterId', 1, 128) &&
+        isOptionalString(data, 'waiterName', 1, 60) &&
+        isOptionalBool(data, 'isVoidAlert') &&
+        isOptionalString(data, 'voidReason', 0, 200);
+
+      let datesOk = (!('printStatus' in data) || (data.printStatus is string && data.printStatus in ['pending', 'printing', 'printed', 'printed_locally', 'failed'])) &&
+        isOptionalBool(data, 'pendingSync') &&
+        isOptionalTimestampOrIso(data, 'createdAt') &&
+        isOptionalTimestampOrIso(data, 'updatedAt') &&
+        isNullableTimestampOrIso(data, 'completedAt');
+
+      return coreOk && metaOk && datesOk;
     }
 
     function isValidOrder(data, orderId) {
-      let coreOk = data.keys().hasOnly([
+      let coreOk = hasOnlyAllowedFields(data, [
           'id', 'locationId', 'locationLabel', 'zone', 'status',
           'items', 'payments',
           'subtotalUsd', 'ivaRate', 'ivaUsd', 'ivaBs',
@@ -492,43 +490,41 @@ service cloud.firestore {
           'voidedCount', 'waiterId', 'waiterName', 'shiftId', 'preFactura',
           'pendingSync', 'openedAt', 'createdAt', 'updatedAt', 'closedAt', 'closedBy'
         ]) &&
-        data.keys().hasAll(['id', 'locationId', 'status', 'items', 'payments', 'totalUsd']) &&
-        data.id is string && data.id.size() >= 1 && data.id.size() <= 128 &&
+        hasRequiredFields(data, ['id', 'locationId', 'status', 'items', 'payments', 'totalUsd']) &&
+        isValidString(data.id, 1, 128) &&
         data.id == orderId &&
-        data.locationId is string && data.locationId.size() >= 1 && data.locationId.size() <= 64 &&
-        (!('locationLabel' in data) || (data.locationLabel is string && data.locationLabel.size() >= 1 && data.locationLabel.size() <= 40)) &&
-        (!('zone' in data) || (data.zone is string && data.zone in ['mesas', 'toldos'])) &&
+        isValidString(data.locationId, 1, 64) &&
+        isOptionalString(data, 'locationLabel', 1, 40) &&
+        (!('zone' in data) || isValidZone(data.zone)) &&
         data.status is string && data.status in ['abierta', 'cerrada'] &&
         data.items is list && data.items.size() <= 200 && (data.items.size() == 0 || data.items[0] is map) &&
         data.payments is list && data.payments.size() <= 20 && (data.payments.size() == 0 || data.payments[0] is map);
 
-      let amountsOk =
-        (!('subtotalUsd' in data) || (data.subtotalUsd is number && data.subtotalUsd >= 0 && data.subtotalUsd <= 100000)) &&
-        (!('ivaRate' in data) || (data.ivaRate is number && data.ivaRate >= 0 && data.ivaRate <= 1)) &&
-        (!('ivaUsd' in data) || (data.ivaUsd is number && data.ivaUsd >= 0 && data.ivaUsd <= 100000)) &&
-        (!('ivaBs' in data) || (data.ivaBs is number && data.ivaBs >= 0 && data.ivaBs <= 1000000000)) &&
-        data.totalUsd is number && data.totalUsd >= 0 && data.totalUsd <= 100000 &&
-        (!('totalBs' in data) || (data.totalBs is number && data.totalBs >= 0 && data.totalBs <= 1000000000)) &&
+      let amountsOk = isOptionalNumberRange(data, 'subtotalUsd', 0, 100000) &&
+        isOptionalNumberRange(data, 'ivaRate', 0, 1) &&
+        isOptionalNumberRange(data, 'ivaUsd', 0, 100000) &&
+        isOptionalNumberRange(data, 'ivaBs', 0, 1000000000) &&
+        isValidNumberRange(data.totalUsd, 0, 100000) &&
+        isOptionalNumberRange(data, 'totalBs', 0, 1000000000) &&
         (!('exchangeRate' in data) || data.exchangeRate == null || (data.exchangeRate is number && data.exchangeRate > 0 && data.exchangeRate <= 1000000));
 
-      let metaOk =
-        (!('voidedCount' in data) || (data.voidedCount is int && data.voidedCount >= 0 && data.voidedCount <= 200)) &&
-        (!('waiterId' in data) || (data.waiterId is string && data.waiterId.size() >= 1 && data.waiterId.size() <= 128)) &&
-        (!('waiterName' in data) || (data.waiterName is string && data.waiterName.size() >= 1 && data.waiterName.size() <= 60)) &&
-        (!('shiftId' in data) || data.shiftId == null || (data.shiftId is string && data.shiftId.size() <= 128)) &&
+      let metaOk = isOptionalIntRange(data, 'voidedCount', 0, 200) &&
+        isOptionalString(data, 'waiterId', 1, 128) &&
+        isOptionalString(data, 'waiterName', 1, 60) &&
+        isNullableString(data, 'shiftId', 0, 128) &&
         (!('preFactura' in data) || data.preFactura == null || isValidPreFactura(data.preFactura)) &&
-        (!('pendingSync' in data) || data.pendingSync is bool) &&
-        (!('openedAt' in data) || isValidTimestampOrIso(data.openedAt)) &&
-        (!('createdAt' in data) || isValidTimestampOrIso(data.createdAt)) &&
-        (!('updatedAt' in data) || isValidTimestampOrIso(data.updatedAt)) &&
-        (!('closedAt' in data) || data.closedAt == null || isValidTimestampOrIso(data.closedAt)) &&
-        (!('closedBy' in data) || data.closedBy == null || (data.closedBy is string && data.closedBy.size() >= 1 && data.closedBy.size() <= 128));
+        isOptionalBool(data, 'pendingSync') &&
+        isOptionalTimestampOrIso(data, 'openedAt') &&
+        isOptionalTimestampOrIso(data, 'createdAt') &&
+        isOptionalTimestampOrIso(data, 'updatedAt') &&
+        isNullableTimestampOrIso(data, 'closedAt') &&
+        isNullableString(data, 'closedBy', 1, 128);
 
       return coreOk && amountsOk && metaOk;
     }
 
     function isValidIngredient(data, ingredientId) {
-      return hasOnlyAllowedFields(data, [
+      let coreOk = hasOnlyAllowedFields(data, [
           'id', 'name', 'unit', 'stock', 'minStock',
           'unitCostUsd', 'category', 'active', 'createdAt', 'updatedAt'
         ]) &&
@@ -539,16 +535,19 @@ service cloud.firestore {
         isValidUnit(data.unit) &&
         // Negative stock explicitly allowed during rush hour per POS spec
         isValidNumberRange(data.stock, -1000000, 10000000) &&
-        isValidNumberRange(data.minStock, 0, 10000000) &&
-        isOptionalNumberRange(data, 'unitCostUsd', 0, 100000) &&
+        isValidNumberRange(data.minStock, 0, 10000000);
+
+      let metaOk = isOptionalNumberRange(data, 'unitCostUsd', 0, 100000) &&
         isOptionalString(data, 'category', 0, 50) &&
         isOptionalBool(data, 'active') &&
         isOptionalTimestampOrIso(data, 'createdAt') &&
         isOptionalTimestampOrIso(data, 'updatedAt');
+
+      return coreOk && metaOk;
     }
 
     function isValidInventoryMovement(data, movementId) {
-      return hasOnlyAllowedFields(data, [
+      let coreOk = hasOnlyAllowedFields(data, [
           'id', 'ingredientId', 'ingredientName', 'type', 'delta',
           'unit', 'stockAfter', 'comandaId', 'orderId', 'referenceId',
           'reason', 'userId', 'createdAt'
@@ -557,13 +556,14 @@ service cloud.firestore {
         isValidString(data.id, 1, 128) &&
         data.id == movementId &&
         isValidString(data.ingredientId, 1, 64) &&
-        isOptionalString(data, 'ingredientName', 1, 100) &&
         data.type in [
           'venta', 'reposicion', 'merma', 'ajuste', 'anulacion', 'anulacion_devolucion',
           'restock', 'sale', 'waste', 'adjustment', 'void_restock'
         ] &&
         isValidNumberRange(data.delta, -1000000, 1000000) &&
-        (data.delta != 0 || data.type == 'merma') &&
+        (data.delta != 0 || data.type == 'merma');
+
+      let metaOk = isOptionalString(data, 'ingredientName', 1, 100) &&
         (!('unit' in data) || isValidUnit(data.unit)) &&
         isOptionalNumberRange(data, 'stockAfter', -1000000, 10000000) &&
         isNullableString(data, 'comandaId', 1, 128) &&
@@ -572,10 +572,12 @@ service cloud.firestore {
         isOptionalString(data, 'reason', 0, 300) &&
         isOptionalString(data, 'userId', 1, 128) &&
         isValidTimestampOrIso(data.createdAt);
+
+      return coreOk && metaOk;
     }
 
     function isValidShift(data, shiftId) {
-      return hasOnlyAllowedFields(data, [
+      let coreOk = hasOnlyAllowedFields(data, [
           'id', 'status', 'openedAt', 'openedBy', 'closedAt', 'closedBy',
           'exchangeRateAtClose', 'orderCount', 'ordersCount',
           'totalUsd', 'totalBs', 'totalSalesUsd', 'totalSalesBs',
@@ -585,96 +587,113 @@ service cloud.firestore {
         isValidString(data.id, 1, 128) &&
         data.id == shiftId &&
         data.status in ['abierto', 'cerrado'] &&
-        isValidTimestampOrIso(data.openedAt) &&
-        isOptionalString(data, 'openedBy', 1, 128) &&
-        isNullableTimestampOrIso(data, 'closedAt') &&
-        isNullableString(data, 'closedBy', 1, 128) &&
-        (!('exchangeRateAtClose' in data) || data.exchangeRateAtClose == null || (data.exchangeRateAtClose is number && data.exchangeRateAtClose > 0 && data.exchangeRateAtClose <= 1000000)) &&
+        isValidTimestampOrIso(data.openedAt);
+
+      let totalsOk = (!('exchangeRateAtClose' in data) || data.exchangeRateAtClose == null || (data.exchangeRateAtClose is number && data.exchangeRateAtClose > 0 && data.exchangeRateAtClose <= 1000000)) &&
         isOptionalIntRange(data, 'orderCount', 0, 100000) &&
         isOptionalIntRange(data, 'ordersCount', 0, 100000) &&
         isOptionalNumberRange(data, 'totalUsd', 0, 10000000) &&
         isOptionalNumberRange(data, 'totalBs', 0, 10000000000) &&
         isOptionalNumberRange(data, 'totalSalesUsd', 0, 10000000) &&
-        isOptionalNumberRange(data, 'totalSalesBs', 0, 10000000000) &&
+        isOptionalNumberRange(data, 'totalSalesBs', 0, 10000000000);
+
+      let metaOk = isOptionalString(data, 'openedBy', 1, 128) &&
+        isNullableTimestampOrIso(data, 'closedAt') &&
+        isNullableString(data, 'closedBy', 1, 128) &&
         (!('totalsByMethod' in data) || (
           data.totalsByMethod is map &&
           data.totalsByMethod.keys().hasOnly(['zelle', 'efectivo_usd', 'debito_punto', 'efectivo_bs'])
         )) &&
         isNullableString(data, 'notes', 0, 500) &&
         isOptionalTimestampOrIso(data, 'updatedAt');
+
+      return coreOk && totalsOk && metaOk;
     }
 
     function isValidUserProfile(data, userId) {
-      return hasOnlyAllowedFields(data, ['id', 'name', 'role', 'pin', 'active', 'createdAt', 'updatedAt']) &&
+      let coreOk = hasOnlyAllowedFields(data, ['id', 'name', 'role', 'pin', 'active', 'createdAt', 'updatedAt']) &&
         hasRequiredFields(data, ['id', 'name', 'role', 'pin', 'active']) &&
         isValidString(data.id, 1, 128) &&
         data.id == userId &&
         isValidString(data.name, 1, 80) &&
         isValidRoleValue(data.role) &&
         isValidString(data.pin, 4, 128) &&
-        data.active is bool &&
-        isOptionalTimestampOrIso(data, 'createdAt') &&
+        data.active is bool;
+
+      let metaOk = isOptionalTimestampOrIso(data, 'createdAt') &&
         isOptionalTimestampOrIso(data, 'updatedAt');
+
+      return coreOk && metaOk;
     }
 
     function isValidPublicSettings(data) {
-      return hasOnlyAllowedFields(data, [
+      let coreOk = hasOnlyAllowedFields(data, [
           'restaurantName', 'printer',
           'exchangeRate', 'exchangeRateUpdatedAt', 'exchangeRateSource',
           'updatedAt'
         ]) &&
         hasRequiredFields(data, ['restaurantName', 'printer']) &&
         isValidString(data.restaurantName, 1, 100) &&
-        isValidPrinterConfig(data.printer) &&
-        (!('exchangeRate' in data) || (data.exchangeRate is number && data.exchangeRate > 0 && data.exchangeRate <= 1000000)) &&
+        isValidPrinterConfig(data.printer);
+
+      let metaOk = (!('exchangeRate' in data) || (data.exchangeRate is number && data.exchangeRate > 0 && data.exchangeRate <= 1000000)) &&
         isOptionalTimestampOrIso(data, 'exchangeRateUpdatedAt') &&
         isOptionalString(data, 'exchangeRateSource', 0, 100) &&
         isOptionalTimestampOrIso(data, 'updatedAt');
+
+      return coreOk && metaOk;
     }
 
     function isValidAdminSettings(data) {
-      return hasOnlyAllowedFields(data, [
+      let coreOk = hasOnlyAllowedFields(data, [
           'restaurantName', 'exchangeRate', 'exchangeRateUpdatedAt', 'exchangeRateSource',
           'printer', 'defaultCurrency', 'updatedAt', 'updatedBy'
         ]) &&
         isOptionalString(data, 'restaurantName', 1, 100) &&
         (!('exchangeRate' in data) || (data.exchangeRate is number && data.exchangeRate > 0 && data.exchangeRate <= 1000000)) &&
-        isOptionalTimestampOrIso(data, 'exchangeRateUpdatedAt') &&
+        (!('printer' in data) || isValidPrinterConfig(data.printer));
+
+      let metaOk = isOptionalTimestampOrIso(data, 'exchangeRateUpdatedAt') &&
         isOptionalString(data, 'exchangeRateSource', 0, 100) &&
-        (!('printer' in data) || isValidPrinterConfig(data.printer)) &&
         (!('defaultCurrency' in data) || (data.defaultCurrency is string && data.defaultCurrency in ['USD', 'VES'])) &&
         isOptionalTimestampOrIso(data, 'updatedAt') &&
         isOptionalString(data, 'updatedBy', 1, 128);
+
+      return coreOk && metaOk;
     }
 
     function isValidPrintJob(data, jobId) {
-      return data.keys().hasOnly([
+      let coreOk = hasOnlyAllowedFields(data, [
           'id', 'type', 'status', 'referenceId', 'title', 'textPreview', 'error',
           'comandaId', 'orderId', 'shiftId',
           'payloadText', 'copies', 'attempts', 'lastError',
           'printedByStation', 'createdBy', 'createdAt', 'updatedAt', 'printedAt'
         ]) &&
-        data.keys().hasAll(['id', 'type', 'status', 'createdAt']) &&
-        data.id is string && data.id.size() >= 1 && data.id.size() <= 128 &&
+        hasRequiredFields(data, ['id', 'type', 'status', 'createdAt']) &&
+        isValidString(data.id, 1, 128) &&
         data.id == jobId &&
         data.type is string && data.type in ['comanda', 'anulacion', 'precuenta', 'cierre', 'cierre_caja', 'prueba', 'test'] &&
-        data.status is string && data.status in ['pending', 'printing', 'printed', 'printed_locally', 'failed'] &&
-        (!('referenceId' in data) || (data.referenceId is string && data.referenceId.size() <= 128)) &&
-        (!('title' in data) || (data.title is string && data.title.size() >= 1 && data.title.size() <= 200)) &&
-        (!('textPreview' in data) || (data.textPreview is string && data.textPreview.size() >= 1 && data.textPreview.size() <= 16384)) &&
-        (!('error' in data) || data.error == null || (data.error is string && data.error.size() <= 300)) &&
-        (!('comandaId' in data) || data.comandaId == null || (data.comandaId is string && data.comandaId.size() >= 1 && data.comandaId.size() <= 128)) &&
-        (!('orderId' in data) || data.orderId == null || (data.orderId is string && data.orderId.size() >= 1 && data.orderId.size() <= 128)) &&
-        (!('shiftId' in data) || data.shiftId == null || (data.shiftId is string && data.shiftId.size() >= 1 && data.shiftId.size() <= 128)) &&
-        (!('payloadText' in data) || (data.payloadText is string && data.payloadText.size() >= 1 && data.payloadText.size() <= 8192)) &&
-        (!('copies' in data) || (data.copies is int && data.copies >= 1 && data.copies <= 5)) &&
-        (!('attempts' in data) || (data.attempts is int && data.attempts >= 0 && data.attempts <= 20)) &&
-        (!('lastError' in data) || data.lastError == null || (data.lastError is string && data.lastError.size() <= 300)) &&
+        data.status is string && data.status in ['pending', 'printing', 'printed', 'printed_locally', 'failed'];
+
+      let metaOk = isOptionalString(data, 'referenceId', 0, 128) &&
+        isOptionalString(data, 'title', 1, 200) &&
+        isOptionalString(data, 'textPreview', 1, 16384) &&
+        isNullableString(data, 'error', 0, 300) &&
+        isNullableString(data, 'comandaId', 1, 128) &&
+        isNullableString(data, 'orderId', 1, 128) &&
+        isNullableString(data, 'shiftId', 1, 128) &&
+        isOptionalString(data, 'payloadText', 1, 8192);
+
+      let datesOk = isOptionalIntRange(data, 'copies', 1, 5) &&
+        isOptionalIntRange(data, 'attempts', 0, 20) &&
+        isNullableString(data, 'lastError', 0, 300) &&
         (!('printedByStation' in data) || data.printedByStation == null || isValidRoleValue(data.printedByStation)) &&
-        (!('createdBy' in data) || (data.createdBy is string && data.createdBy.size() >= 1 && data.createdBy.size() <= 128)) &&
+        isOptionalString(data, 'createdBy', 1, 128) &&
         isValidTimestampOrIso(data.createdAt) &&
-        (!('updatedAt' in data) || isValidTimestampOrIso(data.updatedAt)) &&
-        (!('printedAt' in data) || data.printedAt == null || isValidTimestampOrIso(data.printedAt));
+        isOptionalTimestampOrIso(data, 'updatedAt') &&
+        isNullableTimestampOrIso(data, 'printedAt');
+
+      return coreOk && metaOk && datesOk;
     }
 
     // ===============================================================
@@ -682,7 +701,7 @@ service cloud.firestore {
     // ===============================================================
 
     // Mesonero location updates:
-    // - Only operational fields allowed (never zone, number, label, id).
+    // - Only operational fields allowed (never zone, number, label, id, preFacturaReady).
     // - Cannot close/free an occupied table (`libre`) or clear/replace an activeOrderId.
     function isValidMesoneroLocationUpdate() {
       let changed = request.resource.data.diff(resource.data).affectedKeys();
@@ -704,8 +723,9 @@ service cloud.firestore {
     }
 
     // Cocina comanda updates:
-    // - Only status, printStatus, updatedAt, completedAt allowed (sequenceNumber immutable).
-    // - Enforces forward KDS progression (void alerts may jump directly to 'lista').
+    // - Only status, printStatus, updatedAt, completedAt allowed (sequenceNumber & items immutable).
+    // - Enforces forward-only KDS progression:
+    //   pendiente -> en_preparacion | lista, en_preparacion -> lista, or same-status printStatus update.
     function isValidCocinaComandaUpdate() {
       let changed = request.resource.data.diff(resource.data).affectedKeys();
       let prev = resource.data.status;
@@ -714,10 +734,8 @@ service cloud.firestore {
       return changed.hasOnly(['status', 'printStatus', 'updatedAt', 'completedAt']) &&
         (
           next == prev ||
-          (prev == 'pendiente' && next == 'en_preparacion') ||
-          (prev == 'en_preparacion' && next == 'lista') ||
-          (prev == 'pendiente' && next == 'lista' &&
-           ('isVoidAlert' in resource.data) && resource.data.isVoidAlert == true)
+          (prev == 'pendiente' && next in ['en_preparacion', 'lista']) ||
+          (prev == 'en_preparacion' && next == 'lista')
         );
     }
 
@@ -808,6 +826,96 @@ service cloud.firestore {
     }
 
     // ===============================================================
+    // Single-Lookup Multi-Role Dispatch Helpers
+    // Evaluates currentStationRole() & domain validator ONCE per write
+    // ===============================================================
+
+    function canUpdateLocation(locationId) {
+      let role = currentStationRole();
+      return (role == 'caja_admin' || role == 'mesonero') &&
+        isValidLocation(request.resource.data, locationId) && (
+          (role == 'caja_admin' && areImmutableFieldsUnchanged(['id'])) ||
+          (role == 'mesonero' && isValidMesoneroLocationUpdate())
+        );
+    }
+
+    function canCreateComanda(comandaId) {
+      let role = currentStationRole();
+      return (role == 'caja_admin' || role == 'mesonero') &&
+        isValidComanda(request.resource.data, comandaId) && (
+          role == 'caja_admin' || (
+            request.resource.data.status == 'pendiente' &&
+            (!('isVoidAlert' in request.resource.data) || request.resource.data.isVoidAlert == false) &&
+            (!('printStatus' in request.resource.data) || request.resource.data.printStatus in ['pending', 'printed_locally'])
+          )
+        );
+    }
+
+    function canUpdateComanda(comandaId) {
+      let role = currentStationRole();
+      return role != null &&
+        isValidComanda(request.resource.data, comandaId) && (
+          (role == 'caja_admin' && areImmutableFieldsUnchanged(['id', 'orderId', 'locationId']) && isUnchangedIfPresent('createdAt')) ||
+          (role == 'cocina' && isValidCocinaComandaUpdate()) ||
+          (role == 'mesonero' && isValidMesoneroComandaUpdate())
+        );
+    }
+
+    function canReadOrder() {
+      let role = currentStationRole();
+      return role == 'caja_admin' ||
+        (role == 'mesonero' && (resource == null || resource.data.status == 'abierta'));
+    }
+
+    function canCreateOrder(orderId) {
+      let role = currentStationRole();
+      return (role == 'caja_admin' || role == 'mesonero') &&
+        isValidOrder(request.resource.data, orderId) && (
+          role == 'caja_admin' || (
+            request.resource.data.status == 'abierta' &&
+            request.resource.data.payments.size() == 0 &&
+            (!('closedAt' in request.resource.data) || request.resource.data.closedAt == null) &&
+            (!('closedBy' in request.resource.data) || request.resource.data.closedBy == null) &&
+            (!('voidedCount' in request.resource.data) || request.resource.data.voidedCount == 0) &&
+            (!('preFactura' in request.resource.data) || request.resource.data.preFactura == null)
+          )
+        );
+    }
+
+    function canUpdateOrder(orderId) {
+      let role = currentStationRole();
+      return (role == 'caja_admin' || role == 'mesonero') &&
+        isValidOrder(request.resource.data, orderId) && (
+          (role == 'caja_admin' && isValidAdminOrderUpdate()) ||
+          (role == 'mesonero' && isValidMesoneroOrderUpdate())
+        );
+    }
+
+    function canCreatePrintJob(jobId) {
+      let role = currentStationRole();
+      return role != null &&
+        isValidPrintJob(request.resource.data, jobId) && (
+          role == 'caja_admin' ||
+          (role == 'cocina' &&
+           request.resource.data.type in ['comanda', 'anulacion', 'prueba', 'test'] &&
+           request.resource.data.status in ['pending', 'printing']) ||
+          (role == 'mesonero' &&
+           request.resource.data.type == 'comanda' &&
+           request.resource.data.status in ['pending', 'printed_locally'])
+        );
+    }
+
+    function canUpdatePrintJob(jobId) {
+      let role = currentStationRole();
+      return role != null &&
+        isValidPrintJob(request.resource.data, jobId) && (
+          (role == 'caja_admin' && areImmutableFieldsUnchanged(['id', 'type', 'createdAt'])) ||
+          (role == 'cocina' && isValidCocinaPrintJobUpdate()) ||
+          (role == 'mesonero' && isValidMesoneroPrintJobUpdate())
+        );
+    }
+
+    // ===============================================================
     // Collection Rules
     // ===============================================================
 
@@ -829,12 +937,9 @@ service cloud.firestore {
     // Mesonero: status/activeOrderId/pendingSync/kitchenReadyAlert transitions only.
     // Caja/Admin: full CRUD.
     match /locations/{locationId} {
-      allow read: if isMesonero() || isAdmin();
+      allow read: if isFloorReader();
       allow create: if isAdmin() && isValidLocation(request.resource.data, locationId);
-      allow update: if (
-        (isAdmin() && isValidLocation(request.resource.data, locationId) && areImmutableFieldsUnchanged(['id'])) ||
-        (isMesonero() && isValidLocation(request.resource.data, locationId) && isValidMesoneroLocationUpdate())
-      );
+      allow update: if canUpdateLocation(locationId);
       allow delete: if isAdmin();
     }
 
@@ -842,7 +947,7 @@ service cloud.firestore {
     // Read: mesonero & caja_admin (DENIED to cocina).
     // Write: caja_admin ONLY.
     match /menu/{menuItemId} {
-      allow read: if isMesonero() || isAdmin();
+      allow read: if isFloorReader();
       allow create: if isAdmin() && isValidMenuItem(request.resource.data, menuItemId);
       allow update: if isAdmin() &&
         isValidMenuItem(request.resource.data, menuItemId) &&
@@ -857,19 +962,8 @@ service cloud.firestore {
     // Update: cocina (KDS status/printStatus), mesonero (LAN fallback/sync), caja_admin (full).
     match /comandas/{comandaId} {
       allow read: if isAnyActiveStation();
-      allow create: if (
-        (isAdmin() && isValidComanda(request.resource.data, comandaId)) ||
-        (isMesonero() &&
-         isValidComanda(request.resource.data, comandaId) &&
-         request.resource.data.status == 'pendiente' &&
-         (!('isVoidAlert' in request.resource.data) || request.resource.data.isVoidAlert == false) &&
-         (!('printStatus' in request.resource.data) || request.resource.data.printStatus in ['pending', 'printed_locally']))
-      );
-      allow update: if (
-        (isAdmin() && isValidComanda(request.resource.data, comandaId) && areImmutableFieldsUnchanged(['id', 'orderId', 'locationId']) && isUnchangedIfPresent('createdAt')) ||
-        (isCocina() && isValidComanda(request.resource.data, comandaId) && isValidCocinaComandaUpdate()) ||
-        (isMesonero() && isValidComanda(request.resource.data, comandaId) && isValidMesoneroComandaUpdate())
-      );
+      allow create: if canCreateComanda(comandaId);
+      allow update: if canUpdateComanda(comandaId);
       allow delete: if isAdmin();
     }
 
@@ -878,22 +972,9 @@ service cloud.firestore {
     // Create/Update by mesonero: open orders with 0 payments only; no closing, payments, preFactura, or voids.
     // Caja/Admin: full CRUD (settling, payments, voids, preFactura) with frozen closed-order history.
     match /orders/{orderId} {
-      allow read: if isAdmin() || (isMesonero() && (resource == null || resource.data.status == 'abierta'));
-      allow create: if (
-        (isAdmin() && isValidOrder(request.resource.data, orderId)) ||
-        (isMesonero() &&
-         isValidOrder(request.resource.data, orderId) &&
-         request.resource.data.status == 'abierta' &&
-         request.resource.data.payments.size() == 0 &&
-         (!('closedAt' in request.resource.data) || request.resource.data.closedAt == null) &&
-         (!('closedBy' in request.resource.data) || request.resource.data.closedBy == null) &&
-         (!('voidedCount' in request.resource.data) || request.resource.data.voidedCount == 0) &&
-         (!('preFactura' in request.resource.data) || request.resource.data.preFactura == null))
-      );
-      allow update: if (
-        (isAdmin() && isValidOrder(request.resource.data, orderId) && isValidAdminOrderUpdate()) ||
-        (isMesonero() && isValidOrder(request.resource.data, orderId) && isValidMesoneroOrderUpdate())
-      );
+      allow read: if canReadOrder();
+      allow create: if canCreateOrder(orderId);
+      allow update: if canUpdateOrder(orderId);
       allow delete: if isAdmin();
     }
 
@@ -965,22 +1046,8 @@ service cloud.firestore {
     // Delete: caja_admin ONLY.
     match /printJobs/{jobId} {
       allow read: if isAnyActiveStation();
-      allow create: if (
-        (isAdmin() && isValidPrintJob(request.resource.data, jobId)) ||
-        (isCocina() &&
-         isValidPrintJob(request.resource.data, jobId) &&
-         request.resource.data.type in ['comanda', 'anulacion', 'prueba', 'test'] &&
-         request.resource.data.status in ['pending', 'printing']) ||
-        (isMesonero() &&
-         isValidPrintJob(request.resource.data, jobId) &&
-         request.resource.data.type == 'comanda' &&
-         request.resource.data.status in ['pending', 'printed_locally'])
-      );
-      allow update: if (
-        (isAdmin() && isValidPrintJob(request.resource.data, jobId) && areImmutableFieldsUnchanged(['id', 'type', 'createdAt'])) ||
-        (isCocina() && isValidPrintJob(request.resource.data, jobId) && isValidCocinaPrintJobUpdate()) ||
-        (isMesonero() && isValidPrintJob(request.resource.data, jobId) && isValidMesoneroPrintJobUpdate())
-      );
+      allow create: if canCreatePrintJob(jobId);
+      allow update: if canUpdatePrintJob(jobId);
       allow delete: if isAdmin();
     }
 
