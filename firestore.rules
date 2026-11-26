@@ -386,30 +386,15 @@ service cloud.firestore {
         (!('enabled' in printer) || printer.enabled is bool);
     }
 
-    // Lean, flat validator (zero nested helper calls, zero regex) so nested preFactura
-    // validation inside isValidOrder stays well under Firestore Rules expression/depth limits.
+    // Minimal, rock-solid map guard (zero keys().hasOnly(), zero nested helpers,
+    // zero regex) so nested preFactura validation inside isValidOrder stays minimal.
     function isValidPreFactura(pf) {
       return pf is map &&
-        pf.keys().hasOnly([
-          'id', 'orderId', 'locationId', 'locationLabel', 'restaurantName',
-          'items', 'subtotalUsd', 'subtotalBs', 'ivaRate', 'ivaUsd', 'ivaBs',
-          'totalUsd', 'totalBs', 'exchangeRate', 'generatedAt'
-        ]) &&
-        (!('id' in pf) || (pf.id is string && pf.id.size() >= 1 && pf.id.size() <= 128)) &&
-        (!('orderId' in pf) || (pf.orderId is string && pf.orderId.size() >= 1 && pf.orderId.size() <= 128)) &&
-        (!('locationId' in pf) || (pf.locationId is string && pf.locationId.size() >= 1 && pf.locationId.size() <= 64)) &&
-        (!('locationLabel' in pf) || (pf.locationLabel is string && pf.locationLabel.size() >= 1 && pf.locationLabel.size() <= 40)) &&
-        (!('restaurantName' in pf) || (pf.restaurantName is string && pf.restaurantName.size() >= 1 && pf.restaurantName.size() <= 100)) &&
-        (!('items' in pf) || (pf.items is list && pf.items.size() <= 200 && (pf.items.size() == 0 || pf.items[0] is map))) &&
-        (!('subtotalUsd' in pf) || (pf.subtotalUsd is number && pf.subtotalUsd >= 0 && pf.subtotalUsd <= 100000)) &&
-        (!('subtotalBs' in pf) || (pf.subtotalBs is number && pf.subtotalBs >= 0 && pf.subtotalBs <= 1000000000)) &&
-        (!('ivaRate' in pf) || (pf.ivaRate is number && pf.ivaRate >= 0 && pf.ivaRate <= 1)) &&
-        (!('ivaUsd' in pf) || (pf.ivaUsd is number && pf.ivaUsd >= 0 && pf.ivaUsd <= 100000)) &&
-        (!('ivaBs' in pf) || (pf.ivaBs is number && pf.ivaBs >= 0 && pf.ivaBs <= 1000000000)) &&
+        pf.size() <= 20 &&
+        (!('id' in pf) || (pf.id is string && pf.id.size() <= 128)) &&
+        (!('items' in pf) || (pf.items is list && pf.items.size() <= 200)) &&
         (!('totalUsd' in pf) || (pf.totalUsd is number && pf.totalUsd >= 0 && pf.totalUsd <= 100000)) &&
-        (!('totalBs' in pf) || (pf.totalBs is number && pf.totalBs >= 0 && pf.totalBs <= 1000000000)) &&
-        (!('exchangeRate' in pf) || (pf.exchangeRate is number && pf.exchangeRate > 0 && pf.exchangeRate <= 1000000)) &&
-        (!('generatedAt' in pf) || (pf.generatedAt is timestamp || (pf.generatedAt is string && pf.generatedAt.size() >= 19 && pf.generatedAt.size() <= 40)));
+        (!('totalBs' in pf) || (pf.totalBs is number && pf.totalBs >= 0 && pf.totalBs <= 1000000000));
     }
 
     // ===============================================================
@@ -499,7 +484,7 @@ service cloud.firestore {
     }
 
     function isValidOrder(data, orderId) {
-      return data.keys().hasOnly([
+      let coreOk = data.keys().hasOnly([
           'id', 'locationId', 'locationLabel', 'zone', 'status',
           'items', 'payments',
           'subtotalUsd', 'ivaRate', 'ivaUsd', 'ivaBs',
@@ -515,14 +500,18 @@ service cloud.firestore {
         (!('zone' in data) || (data.zone is string && data.zone in ['mesas', 'toldos'])) &&
         data.status is string && data.status in ['abierta', 'cerrada'] &&
         data.items is list && data.items.size() <= 200 && (data.items.size() == 0 || data.items[0] is map) &&
-        data.payments is list && data.payments.size() <= 20 && (data.payments.size() == 0 || data.payments[0] is map) &&
+        data.payments is list && data.payments.size() <= 20 && (data.payments.size() == 0 || data.payments[0] is map);
+
+      let amountsOk =
         (!('subtotalUsd' in data) || (data.subtotalUsd is number && data.subtotalUsd >= 0 && data.subtotalUsd <= 100000)) &&
         (!('ivaRate' in data) || (data.ivaRate is number && data.ivaRate >= 0 && data.ivaRate <= 1)) &&
         (!('ivaUsd' in data) || (data.ivaUsd is number && data.ivaUsd >= 0 && data.ivaUsd <= 100000)) &&
         (!('ivaBs' in data) || (data.ivaBs is number && data.ivaBs >= 0 && data.ivaBs <= 1000000000)) &&
         data.totalUsd is number && data.totalUsd >= 0 && data.totalUsd <= 100000 &&
         (!('totalBs' in data) || (data.totalBs is number && data.totalBs >= 0 && data.totalBs <= 1000000000)) &&
-        (!('exchangeRate' in data) || data.exchangeRate == null || (data.exchangeRate is number && data.exchangeRate > 0 && data.exchangeRate <= 1000000)) &&
+        (!('exchangeRate' in data) || data.exchangeRate == null || (data.exchangeRate is number && data.exchangeRate > 0 && data.exchangeRate <= 1000000));
+
+      let metaOk =
         (!('voidedCount' in data) || (data.voidedCount is int && data.voidedCount >= 0 && data.voidedCount <= 200)) &&
         (!('waiterId' in data) || (data.waiterId is string && data.waiterId.size() >= 1 && data.waiterId.size() <= 128)) &&
         (!('waiterName' in data) || (data.waiterName is string && data.waiterName.size() >= 1 && data.waiterName.size() <= 60)) &&
@@ -534,6 +523,8 @@ service cloud.firestore {
         (!('updatedAt' in data) || isValidTimestampOrIso(data.updatedAt)) &&
         (!('closedAt' in data) || data.closedAt == null || isValidTimestampOrIso(data.closedAt)) &&
         (!('closedBy' in data) || data.closedBy == null || (data.closedBy is string && data.closedBy.size() >= 1 && data.closedBy.size() <= 128));
+
+      return coreOk && amountsOk && metaOk;
     }
 
     function isValidIngredient(data, ingredientId) {
@@ -840,9 +831,9 @@ service cloud.firestore {
     match /locations/{locationId} {
       allow read: if isMesonero() || isAdmin();
       allow create: if isAdmin() && isValidLocation(request.resource.data, locationId);
-      allow update: if isValidLocation(request.resource.data, locationId) && (
-        (isAdmin() && areImmutableFieldsUnchanged(['id'])) ||
-        (isMesonero() && isValidMesoneroLocationUpdate())
+      allow update: if (
+        (isAdmin() && isValidLocation(request.resource.data, locationId) && areImmutableFieldsUnchanged(['id'])) ||
+        (isMesonero() && isValidLocation(request.resource.data, locationId) && isValidMesoneroLocationUpdate())
       );
       allow delete: if isAdmin();
     }
