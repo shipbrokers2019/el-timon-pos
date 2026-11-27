@@ -142,7 +142,7 @@ export function CajaFloorView() {
   );
 
   const selectedOrder = useMemo(() => {
-    if (!selectedLocation) {
+    if (!selectedLocation || selectedLocation.status === 'libre') {
       return null;
     }
     return openOrderByLocationId.get(selectedLocation.id) ?? null;
@@ -292,7 +292,7 @@ export function CajaFloorView() {
   };
 
   const renderLocationCard = (loc: Location) => {
-    const order = openOrderByLocationId.get(loc.id);
+    const order = loc.status !== 'libre' ? openOrderByLocationId.get(loc.id) : undefined;
     const totalUsd = order ? calculateOrderTotalUsd(order.items) : 0;
     const totalBs = order ? usdToBs(totalUsd, rate) : 0;
     const elapsedMin = order ? getElapsedMinutes(order.openedAt, nowMs) : null;
