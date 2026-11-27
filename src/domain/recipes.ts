@@ -3,6 +3,7 @@ import type {
   Ingredient,
   InventoryMovement,
   MenuItem,
+  Order,
   OrderItem,
   Unit,
   VoidDisposition,
@@ -119,6 +120,97 @@ export function applyComandaRecipeDeductions(
   return {
     ingredients: updatedIngredients,
     newMovements,
+  };
+}
+
+/**
+ * Reconciles recipe ingredient deductions for all orders (e.g. rounds created by Mesonero
+ * stations that cannot write directly to /ingredients or /inventoryMovements per RBAC rules).
+ * Strictly idempotent by comandaId so no round is ever deducted twice.
+ */
+export function reconcileOrdersInventoryDeductions(
+  orders: Order[],
+  ingredients: Ingredient[],
+  menu: MenuItem[],
+  existingMovements: InventoryMovement[],
+  nowIso: string = new Date().toISOString(),
+  skipComandaIds?: ReadonlySet<string>,
+): {
+  ingredients: Ingredient[];
+  newMovements: InventoryMovement[];
+  touchedIngredientIds: Set<string>;
+  processedComandaIds: string[];
+} {
+  let currentIngredients = ingredients;
+  let currentMovements = existingMovements;
+  const allNewMovements: InventoryMovement[] = [];
+  const touchedIngredientIds = new Set<string>();
+  const processedComandaIds: string[] = [];
+
+  for (const order of orders) {
+    const itemsByComanda = new Map<string, OrderItem[]>();
+    for (const item of order.items) {
+      if (item.voided === true || !item.comandaId) {
+        continue;
+      }
+      if (skipComandaIds?.has(item.comandaId)) {
+        continue;
+      }
+      const list = itemsByComanda.get(item.comandaId);
+      if (list) {
+        list.push(item);
+      } else {
+        itemsByComanda.set(item.comandaId, [item]);
+      }
+    }
+
+    let roundNumber = 1;
+    for (const [comandaId, items] of itemsByComanda.entries()) {
+      const syntheticComanda: Comanda = {
+        id: comandaId,
+        sequenceNumber: roundNumber,
+        orderId: order.id,
+        locationId: order.locationId,
+        locationLabel: order.locationLabel,
+        zone: order.zone,
+        roundNumber,
+        waiterId: order.waiterId,
+        waiterName: order.waiterName,
+        items,
+        status: 'pendiente',
+        printStatus: 'pending',
+        createdAt: order.openedAt,
+        updatedAt: order.openedAt,
+        isVoidAlert: false,
+      };
+      roundNumber += 1;
+
+      const { ingredients: nextIngredients, newMovements } =
+        applyComandaRecipeDeductions(
+          currentIngredients,
+          menu,
+          syntheticComanda,
+          currentMovements,
+          nowIso,
+        );
+
+      if (newMovements.length > 0) {
+        currentIngredients = nextIngredients;
+        currentMovements = [...currentMovements, ...newMovements];
+        allNewMovements.push(...newMovements);
+        processedComandaIds.push(comandaId);
+        for (const mov of newMovements) {
+          touchedIngredientIds.add(mov.ingredientId);
+        }
+      }
+    }
+  }
+
+  return {
+    ingredients: currentIngredients,
+    newMovements: allNewMovements,
+    touchedIngredientIds,
+    processedComandaIds,
   };
 }
 

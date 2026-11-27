@@ -4,11 +4,13 @@ import {
   applyVoidInventoryResolution,
   convertUnitQuantity,
   getLowStockIngredients,
+  reconcileOrdersInventoryDeductions,
 } from '../../src/domain/recipes';
 import type {
   Comanda,
   Ingredient,
   MenuItem,
+  Order,
   OrderItem,
 } from '../../src/types/pos';
 
@@ -314,5 +316,66 @@ describe('getLowStockIngredients', () => {
 
     const low = getLowStockIngredients(list);
     expect(low.map((i) => i.id)).toEqual(['3', '4', '2']);
+  });
+});
+
+describe('reconcileOrdersInventoryDeductions', () => {
+  it('deducts ingredients for Mesonero orders idempotently when Caja reconciles cloud orders', () => {
+    const ingredients = makeBaseIngredients();
+    const menu = makeBaseMenu();
+    const mesoneroOrder: Order = {
+      id: 'ord-mes-1',
+      locationId: 'mesa-1',
+      locationLabel: 'Mesa 1',
+      zone: 'mesas',
+      waiterId: 'user-carlos',
+      waiterName: 'Carlos (Mesonero)',
+      status: 'abierta',
+      openedAt: '2026-11-26T20:00:00Z',
+      items: [
+        {
+          id: 'cmd-m1-oi-1',
+          menuItemId: 'menu-burger',
+          name: 'Hamburguesa Playera',
+          quantity: 2,
+          unitPriceUsd: 8.5,
+          notes: '',
+          sendsToKitchen: true,
+          comandaId: 'cmd-m1',
+        },
+      ],
+      subtotalUsd: 17,
+      ivaRate: 0.16,
+      ivaUsd: 2.72,
+      ivaBs: 142.8,
+      totalUsd: 19.72,
+      totalBs: 1035.3,
+      exchangeRate: 52.5,
+      payments: [],
+      shiftId: 'shift-1',
+    };
+
+    const first = reconcileOrdersInventoryDeductions(
+      [mesoneroOrder],
+      ingredients,
+      menu,
+      [],
+      '2026-11-26T20:00:05Z',
+    );
+    expect(first.newMovements).toHaveLength(2);
+    expect(first.ingredients.find((i) => i.id === 'ing-carne')?.stock).toBe(1.6);
+    expect(first.ingredients.find((i) => i.id === 'ing-pan')?.stock).toBe(8);
+    expect(first.processedComandaIds).toEqual(['cmd-m1']);
+
+    // Second pass with existing movements is a strict no-op (never double-deducts)
+    const second = reconcileOrdersInventoryDeductions(
+      [mesoneroOrder],
+      first.ingredients,
+      menu,
+      first.newMovements,
+      '2026-11-26T20:00:10Z',
+    );
+    expect(second.newMovements).toHaveLength(0);
+    expect(second.ingredients).toEqual(first.ingredients);
   });
 });

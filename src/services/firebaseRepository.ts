@@ -35,6 +35,7 @@ import type {
   UserProfile,
   VoidDisposition,
 } from '../types/pos';
+import { reconcileOrdersInventoryDeductions } from '../domain/recipes';
 import {
   LocalPosRepository,
   type CloseShiftResult,
@@ -233,6 +234,10 @@ export class FirebasePosRepository implements PosRepository {
   private readonly stationRole: Role | null;
   private readonly unsubscribes: Unsubscribe[] = [];
   private readonly pendingReadyAlertIds = new Set<string>();
+  private readonly reconciledComandaIds = new Set<string>();
+  private hasLoadedIngredientsSnapshot = false;
+  private hasLoadedMovementsSnapshot = false;
+  private hasLoadedMenuSnapshot = false;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private isDisposed = false;
 
@@ -498,6 +503,63 @@ export class FirebasePosRepository implements PosRepository {
     }
   }
 
+  private reconcileRemoteOrderDeductions(): void {
+    if (
+      !this.isAdminWriter() ||
+      !this.hasLoadedIngredientsSnapshot ||
+      !this.hasLoadedMovementsSnapshot ||
+      !this.hasLoadedMenuSnapshot
+    ) {
+      return;
+    }
+
+    const state = this.local.getState();
+    const {
+      ingredients: updatedIngredients,
+      newMovements,
+      touchedIngredientIds,
+      processedComandaIds,
+    } = reconcileOrdersInventoryDeductions(
+      state.orders,
+      state.ingredients,
+      state.menu,
+      state.movements,
+      new Date().toISOString(),
+      this.reconciledComandaIds,
+    );
+
+    if (newMovements.length === 0) {
+      return;
+    }
+
+    for (const comandaId of processedComandaIds) {
+      this.reconciledComandaIds.add(comandaId);
+    }
+
+    this.local.replaceState({
+      ...state,
+      ingredients: updatedIngredients,
+      movements: [...state.movements, ...newMovements],
+    });
+
+    const batch = writeBatch(this.db);
+    for (const movement of newMovements) {
+      batch.set(
+        doc(this.db, 'inventoryMovements', movement.id),
+        stripUndefined(movement),
+        { merge: true },
+      );
+    }
+    for (const ing of updatedIngredients) {
+      if (touchedIngredientIds.has(ing.id)) {
+        batch.set(doc(this.db, 'ingredients', ing.id), stripUndefined(ing), {
+          merge: true,
+        });
+      }
+    }
+    this.commitNonBlocking(batch.commit());
+  }
+
   private mergeRemoteLocationsWithPendingAlerts(
     remoteLocations: Location[],
     currentLocations: Location[],
@@ -568,7 +630,9 @@ export class FirebasePosRepository implements PosRepository {
             if (snap.empty) return;
             const current = this.local.getState();
             const menu = snap.docs.map((d) => d.data() as MenuItem);
+            this.hasLoadedMenuSnapshot = true;
             this.local.replaceState({ ...current, menu });
+            this.reconcileRemoteOrderDeductions();
           },
           (err) => this.handleSnapshotError('menu', err),
         ),
@@ -619,6 +683,7 @@ export class FirebasePosRepository implements PosRepository {
               ...unsyncedLocal.filter((o) => !remoteIds.has(o.id)),
             ];
             this.local.replaceState({ ...current, orders: mergedOrders });
+            this.reconcileRemoteOrderDeductions();
           },
           (err) => this.handleSnapshotError('orders', err),
         ),
@@ -699,10 +764,12 @@ export class FirebasePosRepository implements PosRepository {
           (snap) => {
             if (snap.empty) return;
             const current = this.local.getState();
+            this.hasLoadedIngredientsSnapshot = true;
             this.local.replaceState({
               ...current,
               ingredients: snap.docs.map((d) => d.data() as Ingredient),
             });
+            this.reconcileRemoteOrderDeductions();
           },
           (err) => this.handleSnapshotError('ingredients', err),
         ),
@@ -712,12 +779,14 @@ export class FirebasePosRepository implements PosRepository {
         onSnapshot(
           collection(this.db, 'inventoryMovements'),
           (snap) => {
-            if (snap.empty) return;
+            if (snap.empty && snap.metadata.fromCache) return;
             const current = this.local.getState();
+            this.hasLoadedMovementsSnapshot = true;
             this.local.replaceState({
               ...current,
               movements: snap.docs.map((d) => d.data() as InventoryMovement),
             });
+            this.reconcileRemoteOrderDeductions();
           },
           (err) => this.handleSnapshotError('inventoryMovements', err),
         ),
@@ -1405,6 +1474,7 @@ export class FirebasePosRepository implements PosRepository {
     if (!this.isAdminWriter()) {
       throw new Error('Solo Caja / Admin puede reiniciar los datos.');
     }
+    this.reconciledComandaIds.clear();
     // Preserve real printer config + BCV exchange rate across resets
     const preservedSettings = this.local.getState().settings;
     const failures: string[] = [];
