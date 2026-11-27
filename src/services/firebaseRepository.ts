@@ -813,15 +813,27 @@ export class FirebasePosRepository implements PosRepository {
             !remoteOrderIds.has(o.id) &&
             o.items.some((item) => pendingComandaIds.has(item.comandaId)),
         );
-        const ordersAuthoritative =
-          this.stationRole !== 'mesonero' && !ordersSnap.metadata.fromCache;
+        const ordersAuthoritative = !ordersSnap.metadata.fromCache;
         if (ordersAuthoritative || !locationsSnap.empty) {
+          let nextOrders = current.orders;
+          if (ordersAuthoritative) {
+            if (this.stationRole === 'mesonero') {
+              const unsyncedIds = new Set(unsyncedLocalOrders.map((o) => o.id));
+              const preservedClosed = current.orders.filter(
+                (o) =>
+                  o.status === 'cerrada' &&
+                  !remoteOrderIds.has(o.id) &&
+                  !unsyncedIds.has(o.id),
+              );
+              nextOrders = [...preservedClosed, ...incomingOrders, ...unsyncedLocalOrders];
+            } else {
+              nextOrders = [...incomingOrders, ...unsyncedLocalOrders];
+            }
+          }
           this.local.replaceState({
             ...current,
             locations: mergedLocations,
-            ...(ordersAuthoritative
-              ? { orders: [...incomingOrders, ...unsyncedLocalOrders] }
-              : {}),
+            orders: nextOrders,
           });
         }
       }

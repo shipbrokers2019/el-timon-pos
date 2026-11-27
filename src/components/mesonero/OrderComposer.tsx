@@ -65,15 +65,18 @@ export function OrderComposer({ location, onClose }: OrderComposerProps) {
   const [feedbackMessage, setFeedbackMessage] = useState<string | null>(null);
   const [showingPreFactura, setShowingPreFactura] = useState(false);
 
-  const activeOrder = useMemo(
-    () =>
+  const activeOrder = useMemo(() => {
+    if (location.status === 'libre' || !location.activeOrderId) {
+      return null;
+    }
+    return (
       state.orders.find(
         (order) =>
           order.status === 'abierta' &&
           (order.id === location.activeOrderId || order.locationId === location.id),
-      ) ?? null,
-    [location.activeOrderId, location.id, state.orders],
-  );
+      ) ?? null
+    );
+  }, [location.activeOrderId, location.id, location.status, state.orders]);
 
   const orderRounds = useMemo(() => {
     if (!activeOrder) {

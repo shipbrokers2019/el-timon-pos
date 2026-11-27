@@ -376,4 +376,39 @@ describe('Role Isolation & Core Tablet Flows (Mesonero & Cocina)', () => {
       expect(screen.queryByText(/¡Orden lista en cocina!/i)).not.toBeInTheDocument();
     });
   });
+
+  it('11. Settling an order clears Pre-factura so a freed table never shows a previous cycle pre-factura in Mesonero', async () => {
+    const user = userEvent.setup();
+    const repo = new LocalPosRepository();
+
+    const { order } = await repo.submitComanda({
+      locationId: 'mesa-1',
+      waiterId: 'user-carlos',
+      waiterName: 'Carlos (Mesonero)',
+      items: [{ menuItemId: 'menu-pescado-frito', quantity: 1, notes: '' }],
+    });
+    await repo.createPreCuentaPrintJob(order.id);
+    await repo.settleOrder(order.id, [
+      {
+        id: 'pay-1',
+        method: 'efectivo_usd',
+        currency: 'USD',
+        amountNative: order.totalUsd,
+        amountUsd: order.totalUsd,
+        amountBs: order.totalBs,
+        exchangeRate: order.exchangeRate,
+        paidAt: new Date().toISOString(),
+      },
+    ]);
+
+    renderWithRepo(repo);
+    await enterPin(user, '1111');
+
+    const mesa1Tile = await screen.findByRole('button', { name: /^Mesa 1\b/i });
+    expect(within(mesa1Tile).getByText(/Libre/i)).toBeInTheDocument();
+    expect(within(mesa1Tile).queryByText(/Pre-factura lista/i)).not.toBeInTheDocument();
+
+    await user.click(mesa1Tile);
+    expect(screen.queryByText(/Pre-factura enviada por Caja/i)).not.toBeInTheDocument();
+  });
 });
