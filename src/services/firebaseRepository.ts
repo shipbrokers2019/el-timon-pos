@@ -778,6 +778,7 @@ export class FirebasePosRepository implements PosRepository {
       this.unsubscribes.push(
         onSnapshot(
           collection(this.db, 'inventoryMovements'),
+          { includeMetadataChanges: true },
           (snap) => {
             if (snap.empty && snap.metadata.fromCache) return;
             const current = this.local.getState();
@@ -904,6 +905,31 @@ export class FirebasePosRepository implements PosRepository {
             locations: mergedLocations,
             orders: nextOrders,
           });
+        }
+
+        if (this.isAdminWriter()) {
+          const [ingSnap, movSnap, menuSnap] = await Promise.all([
+            getDocs(collection(this.db, 'ingredients')),
+            getDocs(collection(this.db, 'inventoryMovements')),
+            getDocs(collection(this.db, 'menu')),
+          ]);
+          const latest = this.local.getState();
+          if (!ingSnap.empty) this.hasLoadedIngredientsSnapshot = true;
+          if (!movSnap.metadata.fromCache) this.hasLoadedMovementsSnapshot = true;
+          if (!menuSnap.empty) this.hasLoadedMenuSnapshot = true;
+          this.local.replaceState({
+            ...latest,
+            ...(ingSnap.empty
+              ? {}
+              : { ingredients: ingSnap.docs.map((d) => d.data() as Ingredient) }),
+            ...(!movSnap.metadata.fromCache
+              ? { movements: movSnap.docs.map((d) => d.data() as InventoryMovement) }
+              : {}),
+            ...(menuSnap.empty
+              ? {}
+              : { menu: menuSnap.docs.map((d) => d.data() as MenuItem) }),
+          });
+          this.reconcileRemoteOrderDeductions();
         }
       }
     } catch (err) {
